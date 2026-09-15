@@ -1,0 +1,1022 @@
+--- src/screens/Investments.tsx (原始)
+// Investment Screen - Track investment assets separately from cash
+import React, { useState, useMemo } from 'react';
+import { useDatabase } from '../context/DatabaseContext';
+import { formatCurrency } from '../utils/formatters';
+import { FormattedNumberInput, formattedToNumber } from '../components/FormattedNumberInput';
+import { PieChart, LineChart } from '../components/Charts';
+import { hapticFeedback, showToast, Confetti } from '../components/UI';
+import { Plus, Trash2, X, TrendingUp, TrendingDown, PieChart as PieIcon } from 'lucide-react';
+
+type InvestmentType = 'saham' | 'reksadana' | 'obligasi' | 'crypto' | 'emas' | 'properti' | 'deposito' | 'lainnya';
+
+const INVESTMENT_TYPES: { type: InvestmentType; label: string; icon: string }[] = [
+  { type: 'saham', label: 'Saham', icon: '📈' },
+  { type: 'reksadana', label: 'Reksadana', icon: '📊' },
+  { type: 'obligasi', label: 'Obligasi', icon: '📜' },
+  { type: 'crypto', label: 'Crypto', icon: '₿' },
+  { type: 'emas', label: 'Emas', icon: '🥇' },
+  { type: 'properti', label: 'Properti', icon: '🏠' },
+  { type: 'deposito', label: 'Deposito', icon: '🏦' },
+  { type: 'lainnya', label: 'Lainnya', icon: '💎' },
+];
+
+const TYPE_COLORS: Record<InvestmentType, string> = {
+  saham: '#22C55E',
+  reksadana: '#3B82F6',
+  obligasi: '#A855F7',
+  crypto: '#FB923C',
+  emas: '#EAB308',
+  properti: '#EF4444',
+  deposito: '#06B6D4',
+  lainnya: '#6B7280',
+};
+
+export function Investments() {
+  const { accounts, investments, investmentTransactions, settings, addInvestment, updateInvestment, deleteInvestment, addInvestmentTransaction } = useDatabase();
+  const [showAddAsset, setShowAddAsset] = useState(false);
+  const [showUpdateValue, setShowUpdateValue] = useState<string | null>(null);
+  const [showAddTransaction, setShowAddTransaction] = useState<string | null>(null);
+  const [newName, setNewName] = useState('');
+  const [newType, setNewType] = useState<InvestmentType>('saham');
+  const [newPurchasePrice, setNewPurchasePrice] = useState('');
+  const [newQuantity, setNewQuantity] = useState('');
+  const [newCurrentValue, setNewCurrentValue] = useState('');
+  const [newPurchaseDate, setNewPurchaseDate] = useState(new Date().toISOString().split('T')[0]);
+  const [newValue, setNewValue] = useState('');
+  const [txType, setTxType] = useState<'buy' | 'sell' | 'dividend'>('buy');
+  const [txQuantity, setTxQuantity] = useState('');
+  const [txPrice, setTxPrice] = useState('');
+  const [txDate, setTxDate] = useState(new Date().toISOString().split('T')[0]);
+  const [showConfetti, setShowConfetti] = useState(false);
+  const currency = settings?.currency || 'IDR';
+
+  // Calculate totals
+  const totalInvestment = useMemo(() => investments.reduce((sum, inv) => sum + inv.currentValue, 0), [investments]);
+  const totalCash = useMemo(() => accounts.reduce((sum, acc) => {
+    const income = 0; // simplified
+    return sum + acc.openingBalance;
+  }, 0), [accounts]);
+  const totalWealth = totalCash + totalInvestment;
+
+  // Calculate gains/losses
+  const totalCostBasis = useMemo(() => investments.reduce((sum, inv) => sum + (inv.purchasePrice * inv.quantity), 0), [investments]);
+  const totalGainLoss = totalInvestment - totalCostBasis;
+  const gainLossPercent = totalCostBasis > 0 ? (totalGainLoss / totalCostBasis) * 100 : 0;
+
+  // Pie chart data
+  const pieData = useMemo(() => {
+    const byType = new Map<InvestmentType, number>();
+    investments.forEach(inv => {
+      byType.set(inv.type, (byType.get(inv.type) || 0) + inv.currentValue);
+    });
+    return Array.from(byType.entries()).map(([type, value]) => ({
+      label: INVESTMENT_TYPES.find(t => t.type === type)?.label || type,
+      value,
+      color: TYPE_COLORS[type],
+      icon: INVESTMENT_TYPES.find(t => t.type === type)?.icon,
+    }));
+  }, [investments]);
+
+  // Wealth distribution (cash vs investment)
+  const wealthDistribution = useMemo(() => {
+    return [
+      { label: 'Uang Tunai', value: totalCash, color: '#22C55E', icon: '💵' },
+      { label: 'Investasi', value: totalInvestment, color: '#3B82F6', icon: '📈' },
+    ].filter(d => d.value > 0);
+  }, [totalCash, totalInvestment]);
+
+  const handleAddAsset = () => {
+    if (!newName || !newCurrentValue) return;
+    const currentVal = formattedToNumber(newCurrentValue);
+    const purchasePrice = formattedToNumber(newPurchasePrice) || currentVal;
+    const quantity = formattedToNumber(newQuantity) || 1;
+    addInvestment({
+      name: newName,
+      type: newType,
+      icon: INVESTMENT_TYPES.find(t => t.type === newType)?.icon || '💎',
+      purchasePrice,
+      quantity,
+      currentValue: currentVal,
+      purchaseDate: newPurchaseDate,
+    });
+    setShowAddAsset(false);
+    setNewName(''); setNewCurrentValue(''); setNewPurchasePrice(''); setNewQuantity('');
+    hapticFeedback('medium');
+    showToast({ message: 'Aset investasi ditambahkan', type: 'success' });
+  };
+
+  const handleUpdateValue = async (assetUid: string) => {
+    const val = formattedToNumber(newValue);
+    if (!val) return;
+    await updateInvestment(assetUid, { currentValue: val });
+    setShowUpdateValue(null);
+    setNewValue('');
+    hapticFeedback('light');
+    showToast({ message: 'Nilai aset diperbarui', type: 'success' });
+  };
+
+  const handleAddTransaction = async (assetUid: string) => {
+    const qty = formattedToNumber(txQuantity);
+    const price = formattedToNumber(txPrice);
+    if (!qty || !price) return;
+    const totalAmount = qty * price;
+    await addInvestmentTransaction({
+      assetUid,
+      type: txType,
+      quantity: qty,
+      pricePerUnit: price,
+      totalAmount,
+      date: txDate,
+    });
+    setShowAddTransaction(null);
+    setTxQuantity(''); setTxPrice('');
+    hapticFeedback('medium');
+    if (txType === 'dividend') setShowConfetti(true);
+    showToast({ message: `Transaksi ${txType} dicatat`, type: 'success' });
+  };
+
+  const handleDeleteAsset = async (uid: string) => {
+    await deleteInvestment(uid);
+    hapticFeedback('medium');
+    showToast({ message: 'Aset dihapus', type: 'info' });
+  };
+
+  // Group investments by type
+  const investmentsByType = useMemo(() => {
+    const groups = new Map<InvestmentType, typeof investments>();
+    investments.forEach(inv => {
+      const existing = groups.get(inv.type) || [];
+      groups.set(inv.type, [...existing, inv]);
+    });
+    return groups;
+  }, [investments]);
+
+  return (
+    <div className="flex-1 overflow-y-auto pb-4">
+      {/* Total Wealth Card */}
+      <div className="mx-4 mt-2 p-5 rounded-2xl bg-gradient-to-br from-[#3B82F6]/20 to-[#22C55E]/10 border border-[#3B82F6]/20">
+        <p className="text-[#9CA3AF] text-xs mb-1">Total Kekayaan</p>
+        <p className="text-2xl font-bold text-[#F5F5F5]">{formatCurrency(totalWealth, currency)}</p>
+        <div className="flex gap-4 mt-3">
+          <div className="flex-1 p-2 rounded-lg bg-[#22C55E]/10">
+            <p className="text-[10px] text-[#9CA3AF]">Uang Tunai</p>
+            <p className="text-sm font-semibold text-[#22C55E]">{formatCurrency(totalCash, currency)}</p>
+          </div>
+          <div className="flex-1 p-2 rounded-lg bg-[#3B82F6]/10">
+            <p className="text-[10px] text-[#9CA3AF]">Investasi</p>
+            <p className="text-sm font-semibold text-[#3B82F6]">{formatCurrency(totalInvestment, currency)}</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Gain/Loss Card */}
+      {investments.length > 0 && (
+        <div className="mx-4 mt-3 p-4 rounded-xl bg-[#1C1C1E] border border-[#2C2C2E]">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs text-[#9CA3AF]">Total Gain/Loss</p>
+              <p className={`text-lg font-bold ${totalGainLoss >= 0 ? 'text-[#22C55E]' : 'text-[#EF4444]'}`}>
+                {totalGainLoss >= 0 ? '+' : ''}{formatCurrency(totalGainLoss, currency)}
+              </p>
+            </div>
+            <div className={`flex items-center gap-1 px-3 py-1.5 rounded-full ${totalGainLoss >= 0 ? 'bg-[#22C55E]/10' : 'bg-[#EF4444]/10'}`}>
+              {totalGainLoss >= 0 ? <TrendingUp size={14} className="text-[#22C55E]" /> : <TrendingDown size={14} className="text-[#EF4444]" />}
+              <span className={`text-sm font-semibold ${totalGainLoss >= 0 ? 'text-[#22C55E]' : 'text-[#EF4444]'}`}>
+                {gainLossPercent >= 0 ? '+' : ''}{gainLossPercent.toFixed(1)}%
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Wealth Distribution Pie */}
+      {wealthDistribution.length > 0 && (
+        <div className="mx-4 mt-3 p-4 rounded-xl bg-[#1C1C1E] border border-[#2C2C2E]">
+          <h3 className="text-sm font-semibold text-[#F5F5F5] mb-3 flex items-center gap-2">
+            <PieIcon size={14} /> Distribusi Kekayaan
+          </h3>
+          <PieChart data={wealthDistribution} size={150} />
+        </div>
+      )}
+
+      {/* Investment Breakdown Pie */}
+      {pieData.length > 0 && (
+        <div className="mx-4 mt-3 p-4 rounded-xl bg-[#1C1C1E] border border-[#2C2C2E]">
+          <h3 className="text-sm font-semibold text-[#F5F5F5] mb-3">Breakdown Investasi</h3>
+          <PieChart data={pieData} size={150} />
+        </div>
+      )}
+
+      {/* Investment Assets List */}
+      <div className="mx-4 mt-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-[#F5F5F5]">Aset Investasi</h3>
+          <button onClick={() => setShowAddAsset(true)} className="flex items-center gap-1 text-xs text-[#22C55E]">
+            <Plus size={14} /> Tambah
+          </button>
+        </div>
+
+        {investments.length === 0 ? (
+          <div className="text-center py-12">
+            <div className="text-4xl mb-3">📈</div>
+            <p className="text-[#F5F5F5] font-medium mb-1">Belum Ada Investasi</p>
+            <p className="text-xs text-[#9CA3AF] mb-4">Catat aset investasimu untuk memantau performa portofolio.</p>
+            <button onClick={() => setShowAddAsset(true)} className="py-2.5 px-5 rounded-xl bg-[#22C55E] text-white text-sm font-semibold">
+              Tambah Investasi Pertama
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {Array.from(investmentsByType.entries()).map(([type, assets]) => (
+              <div key={type}>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-base">{INVESTMENT_TYPES.find(t => t.type === type)?.icon}</span>
+                  <span className="text-xs font-medium text-[#9CA3AF] uppercase">{INVESTMENT_TYPES.find(t => t.type === type)?.label}</span>
+                  <span className="text-[10px] text-[#9CA3AF]">
+                    {formatCurrency(assets.reduce((s, a) => s + a.currentValue, 0), currency)}
+                  </span>
+                </div>
+                {assets.map(inv => {
+                  const costBasis = inv.purchasePrice * inv.quantity;
+                  const gainLoss = inv.currentValue - costBasis;
+                  const glPercent = costBasis > 0 ? (gainLoss / costBasis) * 100 : 0;
+                  return (
+                    <div key={inv.uid} className="p-3 rounded-xl bg-[#1C1C1E] border border-[#2C2C2E] mb-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex-1">
+                          <p className="text-sm font-medium text-[#F5F5F5]">{inv.name}</p>
+                          <p className="text-[10px] text-[#9CA3AF]">
+                            {inv.quantity} unit × {formatCurrency(inv.purchasePrice, currency)}
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-sm font-bold text-[#F5F5F5]">{formatCurrency(inv.currentValue, currency)}</p>
+                          <p className={`text-[10px] font-medium ${gainLoss >= 0 ? 'text-[#22C55E]' : 'text-[#EF4444]'}`}>
+                            {gainLoss >= 0 ? '+' : ''}{glPercent.toFixed(1)}%
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 mt-2">
+                        <button onClick={() => { setShowUpdateValue(inv.uid); setNewValue(inv.currentValue.toString()); }}
+                          className="flex-1 py-1.5 rounded-lg bg-[#262626] text-[10px] text-[#9CA3AF]">Update Nilai</button>
+                        <button onClick={() => setShowAddTransaction(inv.uid)}
+                          className="flex-1 py-1.5 rounded-lg bg-[#262626] text-[10px] text-[#9CA3AF]">Transaksi</button>
+                        <button onClick={() => handleDeleteAsset(inv.uid)}
+                          className="py-1.5 px-2 rounded-lg bg-[#EF4444]/10 text-[#EF4444]"><Trash2 size={12} /></button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Add Asset Dialog */}
+      {showAddAsset && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#1C1C1E] rounded-2xl p-6 max-w-sm w-full border border-[#2C2C2E] max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-[#F5F5F5]">Tambah Investasi</h3>
+              <button onClick={() => setShowAddAsset(false)}><X size={20} className="text-[#9CA3AF]" /></button>
+            </div>
+            <div className="space-y-3">
+              <input type="text" value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Nama aset (misal: BBCA, Bitcoin)"
+                className="w-full py-3 px-4 rounded-xl bg-[#262626] border border-[#2C2C2E] text-sm text-[#F5F5F5] placeholder:text-[#9CA3AF] focus:outline-none" />
+              <div>
+                <label className="text-xs text-[#9CA3AF] mb-2 block">Jenis Investasi</label>
+                <div className="grid grid-cols-4 gap-2">
+                  {INVESTMENT_TYPES.map(t => (
+                    <button key={t.type} onClick={() => setNewType(t.type)}
+                      className={`flex flex-col items-center gap-1 p-2 rounded-xl text-center ${newType === t.type ? 'bg-[#22C55E]/10 border border-[#22C55E]/30' : 'bg-[#262626] border border-[#2C2C2E]'}`}>
+                      <span className="text-lg">{t.icon}</span>
+                      <span className="text-[9px] text-[#9CA3AF]">{t.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="text-xs text-[#9CA3AF] mb-1 block">Harga Beli per Unit</label>
+                <FormattedNumberInput value={newPurchasePrice} onChange={setNewPurchasePrice} placeholder="0" prefix="Rp" />
+              </div>
+              <div>
+                <label className="text-xs text-[#9CA3AF] mb-1 block">Jumlah Unit</label>
+                <FormattedNumberInput value={newQuantity} onChange={setNewQuantity} placeholder="1" />
+              </div>
+              <div>
+                <label className="text-xs text-[#9CA3AF] mb-1 block">Nilai Saat Ini (Total)</label>
+                <FormattedNumberInput value={newCurrentValue} onChange={setNewCurrentValue} placeholder="0" prefix="Rp" autoFocus />
+              </div>
+              <input type="date" value={newPurchaseDate} onChange={(e) => setNewPurchaseDate(e.target.value)}
+                className="w-full py-3 px-4 rounded-xl bg-[#262626] border border-[#2C2C2E] text-sm text-[#F5F5F5] focus:outline-none" />
+              <button onClick={handleAddAsset} disabled={!newName || !newCurrentValue}
+                className="w-full py-3 rounded-xl bg-[#22C55E] text-white font-semibold text-sm disabled:opacity-50">Simpan</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Update Value Dialog */}
+      {showUpdateValue && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#1C1C1E] rounded-2xl p-6 max-w-sm w-full border border-[#2C2C2E]">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-[#F5F5F5]">Update Nilai</h3>
+              <button onClick={() => setShowUpdateValue(null)}><X size={20} className="text-[#9CA3AF]" /></button>
+            </div>
+            <div>
+              <label className="text-xs text-[#9CA3AF] mb-1 block">Nilai Saat Ini</label>
+              <FormattedNumberInput value={newValue} onChange={setNewValue} placeholder="0" prefix="Rp" autoFocus />
+            </div>
+            <button onClick={() => handleUpdateValue(showUpdateValue)} disabled={!newValue}
+              className="w-full py-3 rounded-xl bg-[#22C55E] text-white font-semibold text-sm mt-4 disabled:opacity-50">Update</button>
+          </div>
+        </div>
+      )}
+
+      {/* Add Transaction Dialog */}
+      {showAddTransaction && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#1C1C1E] rounded-2xl p-6 max-w-sm w-full border border-[#2C2C2E]">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-[#F5F5F5]">Transaksi Investasi</h3>
+              <button onClick={() => setShowAddTransaction(null)}><X size={20} className="text-[#9CA3AF]" /></button>
+            </div>
+            <div className="space-y-3">
+              <div className="flex gap-2">
+                {(['buy', 'sell', 'dividend'] as const).map(t => (
+                  <button key={t} onClick={() => setTxType(t)}
+                    className={`flex-1 py-2 rounded-xl text-xs font-medium ${txType === t ? 'bg-[#22C55E]/20 text-[#22C55E] border border-[#22C55E]/30' : 'bg-[#262626] text-[#9CA3AF]'}`}>
+                    {t === 'buy' ? 'Beli' : t === 'sell' ? 'Jual' : 'Dividen'}
+                  </button>
+                ))}
+              </div>
+              {txType !== 'dividend' && (
+                <>
+                  <div>
+                    <label className="text-xs text-[#9CA3AF] mb-1 block">Jumlah Unit</label>
+                    <FormattedNumberInput value={txQuantity} onChange={setTxQuantity} placeholder="0" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-[#9CA3AF] mb-1 block">Harga per Unit</label>
+                    <FormattedNumberInput value={txPrice} onChange={setTxPrice} placeholder="0" prefix="Rp" />
+                  </div>
+                </>
+              )}
+              {txType === 'dividend' && (
+                <div>
+                  <label className="text-xs text-[#9CA3AF] mb-1 block">Jumlah Dividen</label>
+                  <FormattedNumberInput value={txPrice} onChange={setTxPrice} placeholder="0" prefix="Rp" />
+                </div>
+              )}
+              <input type="date" value={txDate} onChange={(e) => setTxDate(e.target.value)}
+                className="w-full py-3 px-4 rounded-xl bg-[#262626] border border-[#2C2C2E] text-sm text-[#F5F5F5] focus:outline-none" />
+              <button onClick={() => handleAddTransaction(showAddTransaction)}
+                disabled={txType !== 'dividend' ? (!txQuantity || !txPrice) : !txPrice}
+                className="w-full py-3 rounded-xl bg-[#22C55E] text-white font-semibold text-sm disabled:opacity-50">Simpan</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <Confetti active={showConfetti} onComplete={() => setShowConfetti(false)} />
+    </div>
+  );
+}
+
+
++++ src/screens/Investments.tsx (修改后)
+// Investment Screen - Track investment assets separately from cash
+import React, { useState, useMemo } from 'react';
+import { useDatabase } from '../context/DatabaseContext';
+import { formatCurrency } from '../utils/formatters';
+import { FormattedNumberInput, formattedToNumber } from '../components/FormattedNumberInput';
+import { PieChart } from '../components/Charts';
+import { hapticFeedback, showToast, Confetti } from '../components/UI';
+import { Plus, Trash2, X, TrendingUp, TrendingDown, PieChart as PieIcon, Edit3 } from 'lucide-react';
+import type { InvestmentAsset } from '../db/dexie';
+
+type InvestmentType = 'saham' | 'saham_id' | 'etf' | 'reksadana' | 'obligasi' | 'crypto' | 'emas' | 'properti' | 'deposito' | 'lainnya';
+
+const INVESTMENT_TYPES: { type: InvestmentType; label: string; icon: string; group: string }[] = [
+  { type: 'saham_id', label: 'Saham ID', icon: '🇮🇩', group: 'Saham' },
+  { type: 'saham', label: 'Saham US', icon: '🇺🇸', group: 'Saham' },
+  { type: 'etf', label: 'ETF', icon: '📊', group: 'Saham' },
+  { type: 'reksadana', label: 'Reksadana', icon: '💼', group: 'Saham' },
+  { type: 'obligasi', label: 'Obligasi', icon: '📜', group: 'Pendapatan Tetap' },
+  { type: 'crypto', label: 'Crypto', icon: '₿', group: 'Digital' },
+  { type: 'emas', label: 'Emas', icon: '🥇', group: 'Komoditas' },
+  { type: 'properti', label: 'Properti', icon: '🏠', group: 'Properti' },
+  { type: 'deposito', label: 'Deposito', icon: '🏦', group: 'Perbankan' },
+  { type: 'lainnya', label: 'Lainnya', icon: '💎', group: 'Lainnya' },
+];
+
+const TYPE_COLORS: Record<InvestmentType, string> = {
+  saham: '#22C55E',
+  saham_id: '#EF4444',
+  etf: '#3B82F6',
+  reksadana: '#A855F7',
+  obligasi: '#FB923C',
+  crypto: '#EAB308',
+  emas: '#F59E0B',
+  properti: '#DC2626',
+  deposito: '#06B6D4',
+  lainnya: '#6B7280',
+};
+
+// Calculate effective total shares for Indonesian stocks
+function getEffectiveShares(asset: InvestmentAsset): number {
+  if (asset.type === 'saham_id') {
+    return asset.quantity * 100; // 1 lot = 100 lembar
+  }
+  return asset.quantity;
+}
+
+// Calculate gain/loss from investment transactions
+function calculateGainLossFromTx(assetUid: string, transactions: { assetUid: string; type: string; quantity: number; pricePerUnit: number; totalAmount: number }[]): number {
+  let gainLoss = 0;
+  transactions.filter(t => t.assetUid === assetUid).forEach(t => {
+    if (t.type === 'sell') {
+      // For sell: gain/loss is already captured in the difference
+      // We don't add here because currentValue already reflects remaining position
+    }
+    if (t.type === 'dividend') {
+      gainLoss += t.totalAmount;
+    }
+  });
+  return gainLoss;
+}
+
+export function Investments() {
+  const { accounts, investments, investmentTransactions, settings, addInvestment, updateInvestment, deleteInvestment, addInvestmentTransaction } = useDatabase();
+  const [showAddAsset, setShowAddAsset] = useState(false);
+  const [editingAsset, setEditingAsset] = useState<InvestmentAsset | null>(null);
+  const [showUpdateValue, setShowUpdateValue] = useState<string | null>(null);
+  const [showAddTransaction, setShowAddTransaction] = useState<string | null>(null);
+
+  // Form states
+  const [formName, setFormName] = useState('');
+  const [formType, setFormType] = useState<InvestmentType>('saham_id');
+  const [formPurchasePrice, setFormPurchasePrice] = useState('');
+  const [formQuantity, setFormQuantity] = useState('');
+  const [formCurrentValue, setFormCurrentValue] = useState('');
+  const [formPurchaseDate, setFormPurchaseDate] = useState(new Date().toISOString().split('T')[0]);
+  const [formNotes, setFormNotes] = useState('');
+
+  const [newValue, setNewValue] = useState('');
+  const [txType, setTxType] = useState<'buy' | 'sell' | 'dividend'>('buy');
+  const [txQuantity, setTxQuantity] = useState('');
+  const [txPrice, setTxPrice] = useState('');
+  const [txDate, setTxDate] = useState(new Date().toISOString().split('T')[0]);
+  const [showConfetti, setShowConfetti] = useState(false);
+  const currency = settings?.currency || 'IDR';
+
+  // Calculate totals - including gain/loss
+  const totalInvestment = useMemo(() => {
+    return investments.reduce((sum, inv) => {
+      // currentValue is the base value
+      // Add gain/loss from dividend transactions
+      const dividendGain = investmentTransactions
+        .filter(t => t.assetUid === inv.uid && t.type === 'dividend')
+        .reduce((s, t) => s + t.totalAmount, 0);
+      return sum + inv.currentValue + dividendGain;
+    }, 0);
+  }, [investments, investmentTransactions]);
+
+  const totalCash = useMemo(() => accounts.reduce((sum, acc) => sum + acc.openingBalance, 0), [accounts]);
+  const totalWealth = totalCash + totalInvestment;
+
+  // Calculate gains/losses
+  const totalCostBasis = useMemo(() => {
+    return investments.reduce((sum, inv) => {
+      if (inv.type === 'saham_id') {
+        return sum + (inv.purchasePrice * inv.quantity * 100); // lot × 100 lembar
+      }
+      return sum + (inv.purchasePrice * inv.quantity);
+    }, 0);
+  }, [investments]);
+
+  const totalGainLoss = totalInvestment - totalCostBasis;
+  const gainLossPercent = totalCostBasis > 0 ? (totalGainLoss / totalCostBasis) * 100 : 0;
+
+  // Pie chart data - wealth distribution
+  const wealthDistribution = useMemo(() => {
+    return [
+      { label: 'Uang Tunai', value: totalCash, color: '#22C55E', icon: '💵' },
+      { label: 'Investasi', value: totalInvestment, color: '#3B82F6', icon: '📈' },
+    ].filter(d => d.value > 0);
+  }, [totalCash, totalInvestment]);
+
+  // Investment breakdown by type
+  const pieData = useMemo(() => {
+    const byType = new Map<InvestmentType, number>();
+    investments.forEach(inv => {
+      const dividendGain = investmentTransactions
+        .filter(t => t.assetUid === inv.uid && t.type === 'dividend')
+        .reduce((s, t) => s + t.totalAmount, 0);
+      byType.set(inv.type, (byType.get(inv.type) || 0) + inv.currentValue + dividendGain);
+    });
+    return Array.from(byType.entries()).map(([type, value]) => ({
+      label: INVESTMENT_TYPES.find(t => t.type === type)?.label || type,
+      value,
+      color: TYPE_COLORS[type],
+      icon: INVESTMENT_TYPES.find(t => t.type === type)?.icon,
+    }));
+  }, [investments, investmentTransactions]);
+
+  // Group investments by type
+  const investmentsByType = useMemo(() => {
+    const groups = new Map<InvestmentType, typeof investments>();
+    investments.forEach(inv => {
+      const existing = groups.get(inv.type) || [];
+      groups.set(inv.type, [...existing, inv]);
+    });
+    return groups;
+  }, [investments]);
+
+  const resetForm = () => {
+    setFormName(''); setFormType('saham_id'); setFormPurchasePrice('');
+    setFormQuantity(''); setFormCurrentValue(''); setFormNotes('');
+    setFormPurchaseDate(new Date().toISOString().split('T')[0]);
+  };
+
+  const openEditForm = (asset: InvestmentAsset) => {
+    setEditingAsset(asset);
+    setFormName(asset.name);
+    setFormType(asset.type);
+    setFormPurchasePrice(asset.purchasePrice.toString());
+    setFormQuantity(asset.quantity.toString());
+    setFormCurrentValue(asset.currentValue.toString());
+    setFormPurchaseDate(asset.purchaseDate);
+    setFormNotes(asset.notes || '');
+    setShowAddAsset(true);
+  };
+
+  const handleSaveAsset = async () => {
+    if (!formName || !formCurrentValue) return;
+    const currentVal = formattedToNumber(formCurrentValue);
+    const purchasePrice = formattedToNumber(formPurchasePrice) || currentVal;
+    const quantity = formattedToNumber(formQuantity) || 1;
+    const isIDX = formType === 'saham_id';
+
+    if (editingAsset) {
+      await updateInvestment(editingAsset.uid, {
+        name: formName,
+        type: formType,
+        icon: INVESTMENT_TYPES.find(t => t.type === formType)?.icon || '💎',
+        purchasePrice,
+        quantity,
+        currentValue: currentVal,
+        purchaseDate: formPurchaseDate,
+        notes: formNotes || undefined,
+        market: isIDX ? 'IDX' : 'GLOBAL',
+      });
+      showToast({ message: 'Investasi diperbarui', type: 'success' });
+    } else {
+      await addInvestment({
+        name: formName,
+        type: formType,
+        icon: INVESTMENT_TYPES.find(t => t.type === formType)?.icon || '💎',
+        purchasePrice,
+        quantity,
+        currentValue: currentVal,
+        purchaseDate: formPurchaseDate,
+        notes: formNotes || undefined,
+        market: isIDX ? 'IDX' : 'GLOBAL',
+      });
+      showToast({ message: 'Aset investasi ditambahkan', type: 'success' });
+    }
+
+    setShowAddAsset(false);
+    setEditingAsset(null);
+    resetForm();
+    hapticFeedback('medium');
+  };
+
+  const handleUpdateValue = async (assetUid: string) => {
+    const val = formattedToNumber(newValue);
+    if (!val) return;
+    await updateInvestment(assetUid, { currentValue: val });
+    setShowUpdateValue(null);
+    setNewValue('');
+    hapticFeedback('light');
+    showToast({ message: 'Nilai aset diperbarui', type: 'success' });
+  };
+
+  const handleAddTransaction = async (assetUid: string) => {
+    const qty = formattedToNumber(txQuantity);
+    const price = formattedToNumber(txPrice);
+    if (!qty || !price) return;
+    const totalAmount = qty * price;
+    await addInvestmentTransaction({
+      assetUid,
+      type: txType,
+      quantity: qty,
+      pricePerUnit: price,
+      totalAmount,
+      date: txDate,
+    });
+    setShowAddTransaction(null);
+    setTxQuantity(''); setTxPrice('');
+    hapticFeedback('medium');
+    if (txType === 'dividend') setShowConfetti(true);
+    showToast({ message: `Transaksi ${txType} dicatat`, type: 'success' });
+  };
+
+  const handleDeleteAsset = async (uid: string) => {
+    await deleteInvestment(uid);
+    hapticFeedback('medium');
+    showToast({ message: 'Aset dihapus', type: 'info' });
+  };
+
+  const isIDXType = (type: InvestmentType) => type === 'saham_id';
+
+  return (
+    <div className="flex-1 overflow-y-auto pb-4">
+      {/* Total Wealth Card */}
+      <div className="mx-4 mt-2 p-5 rounded-2xl bg-gradient-to-br from-[#3B82F6]/20 to-[#22C55E]/10 border border-[#3B82F6]/20">
+        <p className="text-[#9CA3AF] text-xs mb-1">Total Kekayaan</p>
+        <p className="text-2xl font-bold text-[#F5F5F5]">{formatCurrency(totalWealth, currency)}</p>
+        <p className="text-[10px] text-[#9CA3AF] mt-1">Termasuk gain/loss investasi</p>
+        <div className="flex gap-3 mt-3">
+          <div className="flex-1 p-2 rounded-lg bg-[#22C55E]/10">
+            <p className="text-[10px] text-[#9CA3AF]">Uang Tunai</p>
+            <p className="text-sm font-semibold text-[#22C55E]">{formatCurrency(totalCash, currency)}</p>
+          </div>
+          <div className="flex-1 p-2 rounded-lg bg-[#3B82F6]/10">
+            <p className="text-[10px] text-[#9CA3AF]">Investasi</p>
+            <p className="text-sm font-semibold text-[#3B82F6]">{formatCurrency(totalInvestment, currency)}</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Gain/Loss Card */}
+      {investments.length > 0 && (
+        <div className="mx-4 mt-3 p-4 rounded-xl bg-[#1C1C1E] border border-[#2C2C2E]">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs text-[#9CA3AF]">Total Gain/Loss</p>
+              <p className={`text-lg font-bold ${totalGainLoss >= 0 ? 'text-[#22C55E]' : 'text-[#EF4444]'}`}>
+                {totalGainLoss >= 0 ? '+' : ''}{formatCurrency(totalGainLoss, currency)}
+              </p>
+            </div>
+            <div className={`flex items-center gap-1 px-3 py-1.5 rounded-full ${totalGainLoss >= 0 ? 'bg-[#22C55E]/10' : 'bg-[#EF4444]/10'}`}>
+              {totalGainLoss >= 0 ? <TrendingUp size={14} className="text-[#22C55E]" /> : <TrendingDown size={14} className="text-[#EF4444]" />}
+              <span className={`text-sm font-semibold ${totalGainLoss >= 0 ? 'text-[#22C55E]' : 'text-[#EF4444]'}`}>
+                {gainLossPercent >= 0 ? '+' : ''}{gainLossPercent.toFixed(1)}%
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Wealth Distribution Pie */}
+      {wealthDistribution.length > 0 && (
+        <div className="mx-4 mt-3 p-4 rounded-xl bg-[#1C1C1E] border border-[#2C2C2E]">
+          <h3 className="text-sm font-semibold text-[#F5F5F5] mb-3 flex items-center gap-2">
+            <PieIcon size={14} /> Distribusi Kekayaan
+          </h3>
+          <PieChart data={wealthDistribution} size={150} />
+        </div>
+      )}
+
+      {/* Investment Breakdown Pie */}
+      {pieData.length > 0 && (
+        <div className="mx-4 mt-3 p-4 rounded-xl bg-[#1C1C1E] border border-[#2C2C2E]">
+          <h3 className="text-sm font-semibold text-[#F5F5F5] mb-3">Breakdown Investasi</h3>
+          <PieChart data={pieData} size={150} />
+        </div>
+      )}
+
+      {/* Investment Assets List */}
+      <div className="mx-4 mt-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-[#F5F5F5]">Aset Investasi</h3>
+          <button onClick={() => { resetForm(); setEditingAsset(null); setShowAddAsset(true); }} className="flex items-center gap-1 text-xs text-[#22C55E]">
+            <Plus size={14} /> Tambah
+          </button>
+        </div>
+
+        {investments.length === 0 ? (
+          <div className="text-center py-12">
+            <div className="text-4xl mb-3">📈</div>
+            <p className="text-[#F5F5F5] font-medium mb-1">Belum Ada Investasi</p>
+            <p className="text-xs text-[#9CA3AF] mb-4">Catat aset investasimu untuk memantau performa portofolio.</p>
+            <button onClick={() => setShowAddAsset(true)} className="py-2.5 px-5 rounded-xl bg-[#22C55E] text-white text-sm font-semibold">
+              Tambah Investasi Pertama
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {Array.from(investmentsByType.entries()).map(([type, assets]) => (
+              <div key={type}>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-base">{INVESTMENT_TYPES.find(t => t.type === type)?.icon}</span>
+                  <span className="text-xs font-medium text-[#9CA3AF] uppercase">{INVESTMENT_TYPES.find(t => t.type === type)?.label}</span>
+                  <span className="text-[10px] text-[#9CA3AF]">
+                    {formatCurrency(assets.reduce((s, a) => s + a.currentValue, 0), currency)}
+                  </span>
+                </div>
+                {assets.map(inv => {
+                  const isIDX = inv.type === 'saham_id';
+                  const effectiveShares = isIDX ? inv.quantity * 100 : inv.quantity;
+                  const costBasis = isIDX ? (inv.purchasePrice * inv.quantity * 100) : (inv.purchasePrice * inv.quantity);
+                  const dividendGain = investmentTransactions
+                    .filter(t => t.assetUid === inv.uid && t.type === 'dividend')
+                    .reduce((s, t) => s + t.totalAmount, 0);
+                  const gainLoss = (inv.currentValue + dividendGain) - costBasis;
+                  const glPercent = costBasis > 0 ? (gainLoss / costBasis) * 100 : 0;
+
+                  return (
+                    <div key={inv.uid} className="p-3 rounded-xl bg-[#1C1C1E] border border-[#2C2C2E] mb-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm font-medium text-[#F5F5F5]">{inv.name}</p>
+                            {isIDX && <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#EF4444]/10 text-[#EF4444]">IDX</span>}
+                          </div>
+                          <p className="text-[10px] text-[#9CA3AF]">
+                            {isIDX ? (
+                              <>
+                                {inv.quantity} lot ({effectiveShares} lembar) × {formatCurrency(inv.purchasePrice, currency)}
+                              </>
+                            ) : (
+                              <>{inv.quantity} unit × {formatCurrency(inv.purchasePrice, currency)}</>
+                            )}
+                          </p>
+                          {inv.notes && <p className="text-[10px] text-[#9CA3AF] italic mt-0.5">"{inv.notes}"</p>}
+                        </div>
+                        <div className="text-right">
+                          <p className="text-sm font-bold text-[#F5F5F5]">{formatCurrency(inv.currentValue + dividendGain, currency)}</p>
+                          <p className={`text-[10px] font-medium ${gainLoss >= 0 ? 'text-[#22C55E]' : 'text-[#EF4444]'}`}>
+                            {gainLoss >= 0 ? '+' : ''}{glPercent.toFixed(1)}%
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 mt-2">
+                        <button onClick={() => openEditForm(inv)}
+                          className="flex-1 py-1.5 rounded-lg bg-[#262626] text-[10px] text-[#9CA3AF] flex items-center justify-center gap-1">
+                          <Edit3 size={10} /> Edit
+                        </button>
+                        <button onClick={() => { setShowUpdateValue(inv.uid); setNewValue(inv.currentValue.toString()); }}
+                          className="flex-1 py-1.5 rounded-lg bg-[#262626] text-[10px] text-[#9CA3AF]">Update Nilai</button>
+                        <button onClick={() => setShowAddTransaction(inv.uid)}
+                          className="flex-1 py-1.5 rounded-lg bg-[#262626] text-[10px] text-[#9CA3AF]">Transaksi</button>
+                        <button onClick={() => handleDeleteAsset(inv.uid)}
+                          className="py-1.5 px-2 rounded-lg bg-[#EF4444]/10 text-[#EF4444]"><Trash2 size={12} /></button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Add/Edit Asset Dialog */}
+      {showAddAsset && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#1C1C1E] rounded-2xl p-6 max-w-sm w-full border border-[#2C2C2E] max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-[#F5F5F5]">{editingAsset ? 'Edit Investasi' : 'Tambah Investasi'}</h3>
+              <button onClick={() => { setShowAddAsset(false); setEditingAsset(null); resetForm(); }}><X size={20} className="text-[#9CA3AF]" /></button>
+            </div>
+            <div className="space-y-3">
+              <input type="text" value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="Nama aset (misal: BBCA, AAPL)"
+                className="w-full py-3 px-4 rounded-xl bg-[#262626] border border-[#2C2C2E] text-sm text-[#F5F5F5] placeholder:text-[#9CA3AF] focus:outline-none" />
+
+              <div>
+                <label className="text-xs text-[#9CA3AF] mb-2 block">Jenis Investasi</label>
+                <div className="grid grid-cols-5 gap-2">
+                  {INVESTMENT_TYPES.map(t => (
+                    <button key={t.type} onClick={() => setFormType(t.type)}
+                      className={`flex flex-col items-center gap-1 p-2 rounded-xl text-center ${formType === t.type ? 'bg-[#22C55E]/10 border border-[#22C55E]/30' : 'bg-[#262626] border border-[#2C2C2E]'}`}>
+                      <span className="text-lg">{t.icon}</span>
+                      <span className="text-[8px] text-[#9CA3AF]">{t.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Indonesian stock info */}
+              {isIDXType(formType) && (
+                <div className="p-3 rounded-xl bg-[#EF4444]/5 border border-[#EF4444]/20">
+                  <p className="text-[10px] text-[#EF4444] font-medium mb-1">🇮🇩 Saham Indonesia (IDX)</p>
+                  <p className="text-[10px] text-[#9CA3AF]">
+                    1 lot = 100 lembar. Masukkan jumlah dalam lot, harga per lembar.
+                  </p>
+                </div>
+              )}
+
+              <div>
+                <label className="text-xs text-[#9CA3AF] mb-1 block">
+                  Harga {isIDXType(formType) ? 'per Lembar' : 'per Unit'}
+                </label>
+                <FormattedNumberInput value={formPurchasePrice} onChange={setFormPurchasePrice} placeholder="0" prefix="Rp" />
+              </div>
+
+              <div>
+                <label className="text-xs text-[#9CA3AF] mb-1 block">
+                  Jumlah {isIDXType(formType) ? 'Lot' : 'Unit'}
+                </label>
+                <FormattedNumberInput value={formQuantity} onChange={setFormQuantity} placeholder="1" />
+                {isIDXType(formType) && formQuantity && (
+                  <p className="text-[10px] text-[#9CA3AF] mt-1">
+                    = {formattedToNumber(formQuantity) * 100} lembar
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="text-xs text-[#9CA3AF] mb-1 block">Nilai Saat Ini (Total)</label>
+                <FormattedNumberInput value={formCurrentValue} onChange={setFormCurrentValue} placeholder="0" prefix="Rp" />
+              </div>
+
+              <input type="date" value={formPurchaseDate} onChange={(e) => setFormPurchaseDate(e.target.value)}
+                className="w-full py-3 px-4 rounded-xl bg-[#262626] border border-[#2C2C2E] text-sm text-[#F5F5F5] focus:outline-none" />
+
+              <input type="text" value={formNotes} onChange={(e) => setFormNotes(e.target.value)} placeholder="Catatan (opsional)"
+                className="w-full py-3 px-4 rounded-xl bg-[#262626] border border-[#2C2C2E] text-sm text-[#F5F5F5] placeholder:text-[#9CA3AF] focus:outline-none" />
+
+              <button onClick={handleSaveAsset} disabled={!formName || !formCurrentValue}
+                className="w-full py-3 rounded-xl bg-[#22C55E] text-white font-semibold text-sm disabled:opacity-50">
+                {editingAsset ? 'Simpan Perubahan' : 'Tambah Aset'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Update Value Dialog */}
+      {showUpdateValue && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#1C1C1E] rounded-2xl p-6 max-w-sm w-full border border-[#2C2C2E]">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-[#F5F5F5]">Update Nilai</h3>
+              <button onClick={() => setShowUpdateValue(null)}><X size={20} className="text-[#9CA3AF]" /></button>
+            </div>
+            <div>
+              <label className="text-xs text-[#9CA3AF] mb-1 block">Nilai Saat Ini</label>
+              <FormattedNumberInput value={newValue} onChange={setNewValue} placeholder="0" prefix="Rp" autoFocus />
+            </div>
+            <button onClick={() => handleUpdateValue(showUpdateValue)} disabled={!newValue}
+              className="w-full py-3 rounded-xl bg-[#22C55E] text-white font-semibold text-sm mt-4 disabled:opacity-50">Update</button>
+          </div>
+        </div>
+      )}
+
+      {/* Add Transaction Dialog */}
+      {showAddTransaction && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#1C1C1E] rounded-2xl p-6 max-w-sm w-full border border-[#2C2C2E]">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-[#F5F5F5]">Transaksi Investasi</h3>
+              <button onClick={() => setShowAddTransaction(null)}><X size={20} className="text-[#9CA3AF]" /></button>
+            </div>
+            <div className="space-y-3">
+              <div className="flex gap-2">
+                {(['buy', 'sell', 'dividend'] as const).map(t => (
+                  <button key={t} onClick={() => setTxType(t)}
+                    className={`flex-1 py-2 rounded-xl text-xs font-medium ${txType === t ? 'bg-[#22C55E]/20 text-[#22C55E] border border-[#22C55E]/30' : 'bg-[#262626] text-[#9CA3AF]'}`}>
+                    {t === 'buy' ? 'Beli' : t === 'sell' ? 'Jual' : 'Dividen'}
+                  </button>
+                ))}
+              </div>
+              {txType !== 'dividend' && (
+                <>
+                  <div>
+                    <label className="text-xs text-[#9CA3AF] mb-1 block">Jumlah Unit</label>
+                    <FormattedNumberInput value={txQuantity} onChange={setTxQuantity} placeholder="0" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-[#9CA3AF] mb-1 block">Harga per Unit</label>
+                    <FormattedNumberInput value={txPrice} onChange={setTxPrice} placeholder="0" prefix="Rp" />
+                  </div>
+                </>
+              )}
+              {txType === 'dividend' && (
+                <div>
+                  <label className="text-xs text-[#9CA3AF] mb-1 block">Jumlah Dividen</label>
+                  <FormattedNumberInput value={txPrice} onChange={setTxPrice} placeholder="0" prefix="Rp" />
+                </div>
+              )}
+              <input type="date" value={txDate} onChange={(e) => setTxDate(e.target.value)}
+                className="w-full py-3 px-4 rounded-xl bg-[#262626] border border-[#2C2C2E] text-sm text-[#F5F5F5] focus:outline-none" />
+              <button onClick={() => handleAddTransaction(showAddTransaction)}
+                disabled={txType !== 'dividend' ? (!txQuantity || !txPrice) : !txPrice}
+                className="w-full py-3 rounded-xl bg-[#22C55E] text-white font-semibold text-sm disabled:opacity-50">Simpan</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <Confetti active={showConfetti} onComplete={() => setShowConfetti(false)} />
+    </div>
+  );
+}
+
+// Standalone Investment Form (used by FAB when on investment tab)
+export function InvestmentForm({ onClose }: { onClose: () => void }) {
+  const { addInvestment, settings } = useDatabase();
+  const [formName, setFormName] = useState('');
+  const [formType, setFormType] = useState<InvestmentType>('saham_id');
+  const [formPurchasePrice, setFormPurchasePrice] = useState('');
+  const [formQuantity, setFormQuantity] = useState('');
+  const [formCurrentValue, setFormCurrentValue] = useState('');
+  const [formPurchaseDate, setFormPurchaseDate] = useState(new Date().toISOString().split('T')[0]);
+  const [formNotes, setFormNotes] = useState('');
+
+  const isIDXType = (type: InvestmentType) => type === 'saham_id';
+
+  const handleSave = async () => {
+    if (!formName || !formCurrentValue) return;
+    const currentVal = formattedToNumber(formCurrentValue);
+    const purchasePrice = formattedToNumber(formPurchasePrice) || currentVal;
+    const quantity = formattedToNumber(formQuantity) || 1;
+    const isIDX = formType === 'saham_id';
+
+    await addInvestment({
+      name: formName,
+      type: formType,
+      icon: INVESTMENT_TYPES.find(t => t.type === formType)?.icon || '💎',
+      purchasePrice,
+      quantity,
+      currentValue: currentVal,
+      purchaseDate: formPurchaseDate,
+      notes: formNotes || undefined,
+      market: isIDX ? 'IDX' : 'GLOBAL',
+    });
+    hapticFeedback('medium');
+    showToast({ message: 'Aset investasi ditambahkan', type: 'success' });
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-[#121212] z-50 flex flex-col">
+      <div className="flex items-center justify-between px-4 py-4 border-b border-[#2C2C2E]">
+        <button onClick={onClose} className="p-2 rounded-lg hover:bg-[#262626]"><X size={20} className="text-[#9CA3AF]" /></button>
+        <h2 className="text-base font-semibold text-[#F5F5F5]">📈 Tambah Investasi</h2>
+        <button onClick={handleSave} disabled={!formName || !formCurrentValue}
+          className="px-4 py-2 rounded-xl bg-[#22C55E] text-white text-sm font-semibold disabled:opacity-50">Simpan</button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+        <input type="text" value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="Nama aset (misal: BBCA, AAPL)"
+          className="w-full py-3 px-4 rounded-xl bg-[#1C1C1E] border border-[#2C2C2E] text-sm text-[#F5F5F5] placeholder:text-[#9CA3AF] focus:outline-none" autoFocus />
+
+        <div>
+          <label className="text-xs text-[#9CA3AF] mb-2 block">Jenis Investasi</label>
+          <div className="grid grid-cols-5 gap-2">
+            {INVESTMENT_TYPES.map(t => (
+              <button key={t.type} onClick={() => setFormType(t.type)}
+                className={`flex flex-col items-center gap-1 p-2 rounded-xl text-center ${formType === t.type ? 'bg-[#22C55E]/10 border border-[#22C55E]/30' : 'bg-[#1C1C1E] border border-[#2C2C2E]'}`}>
+                <span className="text-lg">{t.icon}</span>
+                <span className="text-[8px] text-[#9CA3AF]">{t.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {isIDXType(formType) && (
+          <div className="p-3 rounded-xl bg-[#EF4444]/5 border border-[#EF4444]/20">
+            <p className="text-[10px] text-[#EF4444] font-medium mb-1">🇮🇩 Saham Indonesia (IDX)</p>
+            <p className="text-[10px] text-[#9CA3AF]">1 lot = 100 lembar. Masukkan jumlah dalam lot, harga per lembar.</p>
+          </div>
+        )}
+
+        <div>
+          <label className="text-xs text-[#9CA3AF] mb-1 block">Harga {isIDXType(formType) ? 'per Lembar' : 'per Unit'}</label>
+          <FormattedNumberInput value={formPurchasePrice} onChange={setFormPurchasePrice} placeholder="0" prefix="Rp" />
+        </div>
+
+        <div>
+          <label className="text-xs text-[#9CA3AF] mb-1 block">Jumlah {isIDXType(formType) ? 'Lot' : 'Unit'}</label>
+          <FormattedNumberInput value={formQuantity} onChange={setFormQuantity} placeholder="1" />
+          {isIDXType(formType) && formQuantity && (
+            <p className="text-[10px] text-[#9CA3AF] mt-1">= {formattedToNumber(formQuantity) * 100} lembar</p>
+          )}
+        </div>
+
+        <div>
+          <label className="text-xs text-[#9CA3AF] mb-1 block">Nilai Saat Ini (Total)</label>
+          <FormattedNumberInput value={formCurrentValue} onChange={setFormCurrentValue} placeholder="0" prefix="Rp" />
+        </div>
+
+        <div>
+          <label className="text-xs text-[#9CA3AF] mb-1 block">Tanggal Beli</label>
+          <input type="date" value={formPurchaseDate} onChange={(e) => setFormPurchaseDate(e.target.value)}
+            className="w-full py-3 px-4 rounded-xl bg-[#1C1C1E] border border-[#2C2C2E] text-sm text-[#F5F5F5] focus:outline-none" />
+        </div>
+
+        <div>
+          <label className="text-xs text-[#9CA3AF] mb-1 block">Catatan (opsional)</label>
+          <input type="text" value={formNotes} onChange={(e) => setFormNotes(e.target.value)} placeholder="Catatan tambahan"
+            className="w-full py-3 px-4 rounded-xl bg-[#1C1C1E] border border-[#2C2C2E] text-sm text-[#F5F5F5] placeholder:text-[#9CA3AF] focus:outline-none" />
+        </div>
+      </div>
+    </div>
+  );
+}

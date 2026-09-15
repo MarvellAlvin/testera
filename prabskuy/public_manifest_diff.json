@@ -1,0 +1,21 @@
+--- public/manifest.json (原始)
+
+
++++ public/manifest.json (修改后)
+{
+  "name": "Finance Tracker",
+  "short_name": "Finance",
+  "description": "Kelola keuanganmu dengan mudah",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#121212",
+  "theme_color": "#22C55E",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%2322C55E'/><text x='50' y='65' font-size='50' text-anchor='middle' fill='white'>💰</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    }
+  ]
+}
