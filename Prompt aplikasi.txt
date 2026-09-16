@@ -1,0 +1,1936 @@
+================================================================================
+  PROMPT v7.0 — FINANCE TRACKER ANDROID (KOTLIN + COMPOSE + ROOM)
+  KONSOLIDASI TOTAL v5 + v6 + EKSPANSI RINCI
+  Aplikasi Android Finance Tracker — proyek edukasi (native Android only)
+  MENGGANTIKAN v5 DAN v6 SEPENUHNYA.
+  Kirim dokumen ini UTUH di awal sesi. Jangan dipotong.
+================================================================================
+
+--------------------------------------------------------------------------------
+BAGIAN 0 — PERAN, LAPORAN BUG, ATURAN MUTLAK, GLOSARIUM, PETA DOKUMEN
+--------------------------------------------------------------------------------
+
+PERAN:
+  Senior Android engineer spesialis:
+    - data-integrity & lifecycle persistence
+    - performance (Compose recomposition, Room query, startup, jank)
+    - financial-domain modeling (BigDecimal, presisi, edge-case uang)
+    - UX Android native (Material 3, insets, adaptive, a11y)
+
+KONTEKS PROYEK:
+  - Aplikasi Android native. Kotlin + Jetpack Compose + Room.
+  - Target minimum SDK 26 (Android 8.0), target SDK terbaru stabil.
+  - Satu modul app + :baseline-profile + :benchmark. Tidak ada backend.
+  - Tidak ada jaringan. Semua data lokal (offline-first). Uang & investasi
+    milik user tidak pernah keluar perangkat tanpa aksi eksplisit user
+    (export CSV/JSON/QR).
+
+LAPORAN BUG DARI USER (prioritas #1 — FASE H):
+
+  BUG-1 (CRITICAL):
+    Saat pertama kali dibuka, app SUDAH berisi catatan keuangan dummy.
+    Seharusnya KOSONG: empty state + CTA.
+    Kemungkinan penyebab: createFromAsset, addCallback onCreate INSERT,
+    atau seed otomatis di Application/AppContainer/VM init.
+
+  BUG-2 (BLOCKER — reproduksi eksak):
+    User menekan Reset Data, memakai app, menutupnya, membuka lagi
+    beberapa saat kemudian -> data BALIK menjadi catatan dummy awal;
+    data user HILANG. App tidak bisa dipakai mencatat keuangan.
+    KESIMPULAN: ada logika RE-SEED yang aktif setelah reset / tiap launch.
+    Tugas FASE H: temukan, musnahkan, buktikan tidak bisa terulang.
+
+  BUG-3 (CRITICAL — modul investasi v5.1):
+    (a) Tombol "+" di layar investasi malah membuka layar investasi lagi
+        (bukan form tambah catatan investasi).
+    (b) Tabel Riwayat Investasi belum ada.
+    (c) Total Gain/Loss harus digabung ke tabel Total Kekayaan.
+    (d) Tabel Riwayat harus format persis:
+          | tanggal | jenis investasi | nama aset | jumlah beli | harga saat beli |
+        Header sticky, body scroll panjang.
+    (e) Chart investasi harus menampilkan label kategori (nama jenis +
+        persen), bukan hanya blok warna.
+
+  BUG-4 (UX):
+    FAB "+" menutupi item terakhir di daftar investasi (dan juga daftar
+    transaksi) -> user tidak bisa menghapus riwayat. Setiap LazyColumn
+    wajib punya bottom padding >= tinggi FAB + jarak ke nav bar + margin.
+
+ATURAN MUTLAK (pelanggaran = gagal):
+
+  R1.  Perilaku bisnis TIDAK BOLEH berubah (LAMPIRAN B), kecuali yang
+       secara eksplisit diubah di v7:
+         - Chat Bot DIHAPUS (R13).
+         - "Recurring" -> "Rutinan" + opsi tahunan.
+         - Kategori custom + emoji picker.
+         - Format angka otomatis Indonesia (R14).
+         - Modul Investasi baru (R15, R16).
+  R2.  UI tidak pernah menerima List<Transaction> mentah; agregasi = SQL.
+  R3.  Tidak ada store global; 1 ViewModel per layar.
+  R4.  Semua Flow UI via collectAsStateWithLifecycle().
+  R5.  runBlocking di main = DILARANG.
+  R6.  Animasi 120-220 ms; hanya alpha/scale (graphicsLayer).
+       (Pengecualian: confetti 1,2 dtk & shimmer skeleton — lihat BAGIAN 12.)
+  R7.  Tiap akhir fase: blok STATUS (BAGIAN 16) lalu BERHENTI ("lanjut").
+  R8.  Tidak mengubah hal di luar spesifikasi. Ragu? KUTIP dokumen ini.
+  R9.  Klaim performa/integritas WAJIB bukti (logcat/screenshot/angka).
+  R10. 0 error runtime & lint critical di akhir.
+  R11. DATABASE KOSONG ADALAH STATE YANG VALID. DILARANG ada kode yang
+       menganggap "kosong = harus diisi otomatis".
+  R12. appInitialized TIDAK PERNAH kembali false setelah true pertama kali
+       (kecuali uninstall, atau "Hapus akun & data" §13.8 yang memang
+       wipe total — dalam hal ini didokumentasikan eksplisit).
+  R13. CHAT BOT DIHAPUS TOTAL:
+         - Tidak ada layar Chat.
+         - Tidak ada ChatVM.
+         - Tidak ada tabel chat_messages (drop di Migration).
+         - Tidak ada rule-based parser di LAMPIRAN B poin 8.
+         - Tidak ada entri di bottom nav.
+         - Tidak ada entri di drawer.
+         - Tidak ada string terkait chat di strings.xml.
+  R14. SEMUA input & tampilan nominal menggunakan format angka Indonesia
+       otomatis (pemisah ribuan titik; desimal koma untuk kuantitas
+       pecahan). Tidak boleh menampilkan "1000000" di UI. Tidak boleh
+       menyimpan string berformat ke DB — DB menyimpan Long untuk IDR
+       dan String berisi BigDecimal untuk kuantitas pecahan.
+  R15. INVESTASI TERPISAH dari saldo akun reguler:
+         - Total uang utama = HANYA akun reguler.
+         - Investasi punya layar sendiri (tab bottom nav).
+         - Total Kekayaan = Σ saldo akun + Σ nilai investasi net
+           (after gain/loss).
+         - Uang yang diinvestasikan tidak mengurangi saldo akun.
+  R16. PERHITUNGAN FINANSIAL INVESTASI WAJIB BigDecimal (bukan Double/
+       Float). Alasan: presisi emas 0,001 g & crypto 0,0001 coin tidak
+       boleh error pembulatan. Semua rounding eksplisit
+       RoundingMode.HALF_UP. Semua konversi String<->BigDecimal via
+       BigDecimal.toPlainString(), bukan Double.toString().
+  R17. Satu build flavor: Android saja. Tidak ada PWA/Service Worker/
+       multi-platform klaim palsu. Semua permintaan web di daftar user
+       dipetakan ke padanan native Android.
+  R18. Fitur yang butuh data live dari internet (harga saham/crypto
+       realtime, kurs otomatis, dividend auto-fetch, sync cloud) DILARANG
+       dibuat dengan data palsu. Implementasi jujur: input manual +
+       kalkulasi lokal. Fitur tersebut ditandai STUB/TODO dengan
+       penjelasan API mana yang dibutuhkan.
+
+GLOSARIUM:
+  CRITICAL = menyebabkan BUG-1/2/3/4, lag parah, crash, data corrupt.
+  MAJOR    = boros resource, jank, recomposition berlebihan.
+  MINOR    = kebersihan kode, penamaan, komentar.
+
+PETA DOKUMEN (untuk navigasi cepat):
+  BAGIAN 0  : Peran, bug, aturan mutlak, glosarium (ini).
+  BAGIAN 1  : FASE H — Integritas data lifecycle + matriks M1-M12.
+  BAGIAN 2  : Format angka otomatis Indonesia (R14).
+  BAGIAN 3  : Bottom navigation bar (chat diganti Investasi).
+  BAGIAN 4  : Layar Detail (2 mode: List / Tabel).
+  BAGIAN 5  : Modul Investasi (INTI v7 — sangat rinci).
+  BAGIAN 6  : Budget alert + kategori custom + emoji picker.
+  BAGIAN 7  : Rutinan (dulu Recurring) + opsi tahunan.
+  BAGIAN 8  : Lapisan data (query, indeks, generator, EXPLAIN).
+  BAGIAN 9  : Lapisan state (7 ViewModel, UiState, events).
+  BAGIAN 10 : Lapisan UI (recomposition, chart canvas, insets, adaptive).
+  BAGIAN 11 : Startup & build (deferred init, splash, R8, baseline profile).
+  BAGIAN 12 : Polish (haptic, confetti, shimmer, AMOLED, dsb).
+  BAGIAN 13 : Fitur tambahan (achievements, biometric, privacy, dll).
+  BAGIAN 14 : Benchmark & verifikasi (V1-V12).
+  BAGIAN 15 : Urutan kerja (FASE H sampai FASE S).
+  BAGIAN 16 : Format output, status, kontrol.
+  LAMPIRAN A: Konstanta (warna, ukuran, presisi).
+  LAMPIRAN B: Perilaku bisnis (R1).
+  LAMPIRAN C: Regresi (37 skenario).
+
+--------------------------------------------------------------------------------
+BAGIAN 1 — FASE H: INTEGRITAS DATA LIFECYCLE (KERJAKAN PALING AWAL)
+--------------------------------------------------------------------------------
+
+1.1 DIAGNOSIS D0 — audit dulu, JANGAN ubah kode.
+
+  Periksa dan laporkan (format tabel:
+    No | Lokasi file:baris | Kode | Severity | Masalah | Rencana fix)
+  SEMUA titik berikut:
+
+  (a) Room.databaseBuilder(...):
+        - adakah createFromAsset()?
+        - adakah .addCallback { onCreate { ...INSERT... } }?
+        - isi callback-nya persis apa?
+        - adakah .fallbackToDestructiveMigration()?
+        - berapa versi DB saat ini?
+
+  (b) Semua fungsi bernama mengandung:
+        seed / dummy / populate / default / sample / preview
+      untuk masing-masing:
+        - definisi di file mana?
+        - siapa memanggilnya?
+        - dari mana (Application.onCreate? AppContainer init? ViewModel
+          init? init{} coroutine? LaunchedEffect? WorkManager? Worker?)
+
+  (c) Logika "seed bila kosong":
+        - cari count() == 0, isEmpty(), isEmptyData, firstLaunch,
+          isFirstRun, hasAnyData, databaseEmpty, isDatabaseEmpty.
+        - adakah yang AUTO memanggil seed?
+
+  (d) Implementasi tombol Reset:
+        - daftar persis apa yang dihapus (tabel mana saja?).
+        - apakah file DB di-delete via deleteDatabase()?
+        - apakah SharedPreferences.clear()?
+        - apakah DataStore.clear() (seluruh store)?
+        - apakah flag first-run ikut terhapus (app_initialized)?
+        - apakah kategori default ikut terhapus tanpa re-insert?
+
+  (e) fallbackToDestructiveMigration / clearAllTables / deleteDatabase:
+        - di mana dipakai?
+        - untuk tujuan apa?
+
+  (f) Berapa instance Room & nama DB-nya?
+        - HARUS TEPAT 1 instance, 1 nama DB.
+        - Jika ada >1 (misal preview DB, debug DB), laporkan.
+
+  (g) WorkManager / AlarmManager / JobScheduler / BroadcastReceiver
+      apapun yang menulis ke database:
+        - definisi, jadwal, apa yang ditulis?
+        - adakah yang INSERT data user-like (misal auto-post dummy)?
+
+  (h) Engine auto-post Rutinan:
+        - apakah data dummy berisi Rutinan autoPost yang masih hidup
+          setelah reset (tidak ikut terhapus)?
+        - apakah ada id deterministic "rec-{id}-{dateISO}" yang bisa
+          nyangkut jadi "sudah pernah dipost" setelah reset?
+
+  (i) State yang disimpan hanya di memori (tidak pernah di-flush):
+        - misal List<Transaction> cache di singleton?
+        - flag "hasSeeded" di object Kotlin yang reset tiap proses?
+
+  Output D0:
+    - Tabel temuan lengkap.
+    - Penentuan ROOT CAUSE Bug-1, Bug-2, Bug-3, Bug-4 (bisa >1 penyebab).
+    - Rencana fix per root cause (file:baris).
+    - STATUS -> BERHENTI. Tunggu "lanjut".
+
+1.2 SPESIFIKASI INISIALISASI YANG BENAR (implementasi H2):
+
+  A. AppInitializer — SATU-SATUNYA jalur inisialisasi otomatis:
+     - Flag DataStore: key "app_initialized" (Boolean, default false).
+     - Dipanggil SEKALI per proses, DEFERRED:
+         repeatOnLifecycle(RESUMED) + delay(300) di MainActivity.
+         Bukan di Application.onCreate.
+     - Guard sekali per proses (mis. AtomicBoolean di Application).
+     - Isi PERSIS:
+         suspend fun ensureInitialized() {
+           if (dataStore.appInitialized.first()) return
+           categoryDao.upsertDefaults(CategoryDefaults.LIST)
+           dataStore.setAppInitialized(true)   // tulis PALING AKHIR
+           Log.d("SEED", "source=first_run_categories_only")
+         }
+     - CategoryDefaults = HANYA kategori referensi (id tetap:
+         cat_makan, cat_transport, cat_belanja, cat_hiburan,
+         cat_kesehatan, cat_edukasi, cat_rumah, cat_keuangan,
+         cat_olahraga, cat_travel, cat_hewan, cat_lainnya,
+         termasuk kategori sistem "Tabungan" & "Investasi"),
+       di-insert INSERT OR REPLACE (idempoten).
+     - TIDAK ADA yang lain. Tidak ada akun, transaksi, budget, goals,
+       recurring, chat, habit, XP, challenge state, investment asset.
+     - Semua entitas tersebut: TIDAK PERNAH di-insert otomatis oleh
+       jalur mana pun.
+
+  B. Dummy data = OPT-IN SAJA:
+     - Hanya via:
+         (1) tombol "Load Dummy Data" di Settings.
+         (2) link kecil "atau coba dengan data contoh" di EmptyState
+             dashboard.
+     - Wajib dialog konfirmasi: "Data saat ini akan DIGANTI. Lanjutkan?"
+     - Semua pemanggilan dummy HARUS melewati satu fungsi repository
+       loadDummyData() yang diawali:
+         Log.d("SEED", "source=button")
+     - Tidak ada pemanggil seed dari:
+         Room callback, Application, AppContainer, VM init,
+         pengecekan kekosongan database, LaunchedEffect manapun.
+       (R11)
+     - loadDummyData() WAJIB:
+         - menghapus semua data user yang ada (dengan konfirmasi).
+         - meng-insert set dummy lengkap.
+         - meng-set app_initialized = true (kalau belum) supaya tidak
+           ada double-seed.
+         - dalam satu @Transaction (atomik).
+
+  C. Spesifikasi tombol Reset Semua Data (persis):
+     - SATU method DAO @Transaction (semua DELETE + re-insert kategori):
+         @Transaction suspend fun resetAll(today: String) {
+           clearTransactions(); clearAccounts(); clearBudgets();
+           clearGoals(); clearGoalDeposits(); clearRecurrings();
+           clearChatMessages();  // di Migration chat di-drop, tapi kalau
+                                 // belum drop, tetap panggil untuk aman
+           clearHabitLog(); clearChallengeHistory();
+           clearAchievements(); clearInvestmentAssets();
+           clearInvestmentTx(); clearInvestmentNotes();
+           clearCategories();
+           insertCategories(CategoryDefaults.LIST)
+           resetChallengeState(today)  // lihat bawah
+         }
+     - resetChallengeState SQL:
+         UPDATE challenge_state SET
+           activeChallengeId = NULL,
+           status = 'IDLE',
+           startedAt = NULL,
+           endsAt = NULL,
+           rejectionsLeft = 3,
+           xp = 0,
+           recentIds = '[]',
+           nextPopupAt = :today
+     - DataStore settings: reset ke default (currency=IDR, language=id,
+       amoled=false, budgetAlertGlobal=true, privacyMode=false,
+       onboardingDone=true [supaya tidak muncul lagi], biometricLock=false).
+       KEPUTUSAN: "Reset SEMUA Data" = settings ikut reset;
+       app_initialized TIDAK ikut reset (R12).
+       PENGECUALIAN: "Hapus akun & data" (§13.8) memang wipe total
+       termasuk app_initialized (didokumentasikan eksplisit).
+     - DILARANG: deleteDatabase, hapus file DB, clear DataStore
+       seluruhnya (hapus per-key saja, kecuali app_initialized),
+       fallbackToDestructive untuk reset.
+     - Setelah reset: UI otomatis menampilkan empty state via Flow
+       invalidation Room (verifikasi VM tidak menyimpan cache manual
+       yang harus dibersihkan; kalau ada, bersihkan).
+     - UX reset: tombol -> dialog konfirmasi 1 (beda teks) -> dialog
+       konfirmasi 2 -> progress singkat -> toast sukses -> dashboard
+       kosong.
+     - Log: Log.i("RESET", "tables cleared, appInitialized=true retained").
+
+  D. Hukum anti-pola (semua DILARANG ada di kode final):
+     R-D1  createFromAsset pada database utama.
+     R-D2  Insert data user-like dari jalur selain tombol Load Dummy.
+     R-D3  Logika "if empty then seed" dalam bentuk APA PUN.
+     R-D4  fallbackToDestructiveMigration (pakai Migration; bila terpaksa
+           untuk dev, wajib komentar + appInitialized tetap dipertahankan
+           + kategori re-upsert idempoten).
+     R-D5  Lebih dari 1 instance/nama database Room.
+     R-D6  Set appInitialized=false kembali (kecuali uninstall, atau
+           "Hapus akun & data" §13.8 yang didokumentasikan).
+     R-D7  Reset yang tidak atomik / butuh restart app.
+     R-D8  Background job yang INSERT (kecuali auto-post Rutinan milik
+           user sungguhan & auto-update Deposito milik user — lihat
+           BAGIAN 5.7). Notifikasi pengingat tantangan/budget boleh,
+           read-only.
+     R-D9  State penting hanya di memori.
+
+  E. Instrumen bukti:
+     - Log.d("SEED", "source=...") di SETIAP jalur seed yang tersisa
+       (nilai: "first_run_categories_only", "button"). Debug build saja.
+     - Log.i("RESET", "tables cleared, appInitialized=true retained").
+     - Log.d("DEPOSIT_RENEW", "assetId=... dueDate=... idempotent=...")
+       di engine auto-update deposito.
+
+1.3 MATRIKS VERIFIKASI PERSISTENSI M1-M12
+    (H3 — semua PASS + bukti screenshot/logcat; ini UJI MUTLAK Bug-1,
+    Bug-2, Bug-3, Bug-4):
+
+  M1.  Fresh install (uninstall -> install) ->
+         - 0 akun, 0 transaksi, 0 goal, 0 aset investasi.
+         - kategori ada (infrastruktur tersembunyi).
+         - empty state + CTA tampil.
+         - logcat: SEED source=first_run_categories_only SEKALI.
+
+  M2.  Tekan "Load Dummy Data" -> data dummy tampil (jalur tombol sah).
+
+  M3.  Tekan Reset -> semua kosong, kategori default kembali, XP=0,
+       rejectionsLeft=3, logcat RESET.
+
+  M4.  SETELAH M3: force-stop -> tunggu >= 10 menit (atau reboot
+       emulator) -> buka lagi ->
+         - MASIH KOSONG.
+         - logcat: NOL panggilan SEED.
+         (Ini reproduksi eksak Bug-2 — wajib PASS.)
+
+  M5.  Catat 5 transaksi -> force-stop -> tunggu 10 menit -> buka ->
+       5 transaksi MASIH ADA, angka saldo benar.
+
+  M6.  "Don't keep activities" ON -> catat transaksi -> keluar-app ->
+       balik -> data utuh (process death).
+
+  M7.  Buka-tutup app 3x berturut -> tidak ada seed, data utuh.
+
+  M8.  Selama M4-M7: logcat TIDAK ADA baris "SEED" sama sekali.
+
+  M9.  Buat Rutinan autoPost jatuh tempo kemarin -> Reset -> buka lagi:
+       TIDAK ADA transaksi auto-post muncul (Rutinan ikut terhapus).
+
+  M10. Load Dummy -> Reset -> Load Dummy lagi -> Reset -> tetap
+       konsisten kosong setelah reset terakhir.
+
+  M11. Setelah Reset: buka tab Investasi ->
+         0 aset, 0 riwayat, chart versi-nol rapi ("Belum ada data").
+
+  M12. Buat Deposito auto-update jatuh tempo kemarin ->
+         buka app ->
+           - Deposito ter-update OTOMATIS tepat 1x (idempoten).
+           - force-stop + reopen TIDAK dobel.
+           - logcat DEPOSIT_RENEW idempotent=1.
+
+1.4 FIRST-RUN UX (konsekuensi app mulai KOSONG):
+     - Dashboard 0 akun ->
+         kartu CTA besar "Atur Akun & Saldo Awal" (-> layar Akun)
+         + link kecil "atau coba dengan data contoh" (-> Load Dummy,
+           dengan konfirmasi).
+     - Dashboard ada akun tapi 0 transaksi ->
+         EmptyState "Catat transaksi pertamamu" (buka form)
+         + tombol Load Dummy sekunder.
+     - Habit Plant & chart:
+         tampil versi nol yang rapi (bukan kosong rusak):
+           stage 🌰, 0%, bar kosong, chart baseline + "Belum ada data".
+     - Investasi kosong ->
+         EmptyState "Belum ada aset. Tekan + untuk mencatat investasi
+         pertamamu."
+     - Onboarding Tour (3-5 langkah) muncul SETELAH empty state,
+       sekali saja (flag onboarding_done=true setelah selesai/skip).
+
+--------------------------------------------------------------------------------
+BAGIAN 2 — FORMAT ANGKA OTOMATIS (R14, NEW)
+--------------------------------------------------------------------------------
+
+2.1 ATURAN UMUM:
+     - SEMUA input nominal (transaksi, budget, goal, deposit, harga aset,
+       DCA, simulator, dsb.) memakai AmountTextField custom.
+     - SEMUA tampilan nominal memakai formatter.formatIdr(value) ->
+       "Rp1.000.000".
+     - User mengetik digit -> langsung tampil dengan titik ribuan.
+       Placeholder "0".
+     - Hapus digit -> reformat seketika.
+     - Kursor tetap di kanan digit yang relevan (best-effort; kalau
+       perlu, pakai offset mapping naif).
+     - TIDAK BOLEH ada field nominal yang menampilkan angka mentah
+       (mis. 1000000) di UI.
+     - DB menyimpan Long (untuk IDR) atau String berisi BigDecimal
+       (untuk kuantitas pecahan). TIDAK PERNAH string berformat.
+
+2.2 CONTOH WAJIB (UJI R14):
+     Input user   | Tampil di field | Disimpan DB
+     -------------|-----------------|-------------
+     "100"        | "100"           | 100L
+     "1000"       | "1.000"         | 1000L
+     "10000"      | "10.000"        | 10000L
+     "100000"     | "100.000"       | 100000L
+     "1000000"    | "1.000.000"     | 1000000L
+     "10000000"   | "10.000.000"    | 10000000L
+
+2.3 IMPLEMENTASI:
+     - Gunakan TextFieldValue + VisualTransformation custom
+       "ThousandsSeparatorTransformation".
+     - Alternatif: onValueChange strip non-digit -> formatIdr ->
+       set text.
+     - JANGAN memakai library eksternal (mis. Compose Money).
+     - JANGAN memakai Double untuk parsing. Pakai Long.parseLong untuk
+       IDR.
+     - Locale: IDR pakai "." ribuan; USD pakai "," ribuan + "."
+       desimal. Semua via NumberFormat.getNumberInstance(locale).
+
+2.4 KUANTITAS PECAHAN (INVESTASI):
+     - Emas (gram):
+         maks 3 desimal.
+         Ketik "0,001" -> simpan BigDecimal("0.001").
+         Tampil "0,001 g".
+         Separator desimal: koma (locale Indonesia).
+         Pengguna boleh ketik "0.001" atau "0,001" -> keduanya OK.
+     - Crypto (coin):
+         maks 4 desimal.
+         "0,0001" -> BigDecimal("0.0001").
+         Tampil "0,0001 BTC".
+     - Saham IDX / Saham AS (lot):
+         integer.
+         1 lot IDX = 100 lembar.
+         Input "5" -> berarti 5 lot (bukan 5 lembar).
+     - ETF (shares):
+         integer.
+     - Reksa Dana (Rp):
+         integer rupiah.
+     - Deposito (Rp):
+         integer rupiah + persen (2 desimal) + durasi (integer hari).
+
+2.5 BUKTI R14:
+     - Screenshot 5 angka pada form transaksi (100, 1.000, ..., 1.000.000).
+     - Unit test ThousandsSeparatorTransformationTest:
+         5 kasus + edge (0, 000, leading zeros "007", "1.000.000" -> parse
+         balik ke 1000000L, hapus digit di tengah).
+     - Screenshot emas "0,001" & crypto "0,0001" tanpa kehilangan presisi.
+     - Screenshot DB (via Android Studio Database Inspector):
+         kolom amount = 1000000 (Long), bukan "1.000.000".
+
+2.6 EDGE CASE WAJIB:
+     - Input kosong -> tampil "0" placeholder, tidak error.
+     - Input "0" -> tetap "0" (bukan "000").
+     - Input "0001" -> otomatis jadi "1" (leading zeros dibuang saat
+       parse).
+     - Input "-" -> diabaikan (tidak boleh minus di field nominal).
+     - Input "," -> untuk IDR diabaikan; untuk kuantitas investasi
+       diizinkan sekali.
+     - Copy-paste "Rp1.500.000" -> di-strip jadi "1500000" -> tampil
+       "1.500.000".
+     - Copy-paste "1,000,000" (locale US) -> di-strip jadi "1000000"
+       -> tampil "1.000.000".
+     - Semua ini WAJIB ada unit test.
+
+--------------------------------------------------------------------------------
+BAGIAN 3 — BOTTOM NAVIGATION BAR (CHAT DIHAPUS, INVESTASI DITAMBAH)
+--------------------------------------------------------------------------------
+
+3.1 STRUKTUR:
+     - Material 3 NavigationBar.
+     - Tinggi 80 dp.
+     - Background #1C1C1E.
+     - tonalElevation 0.
+     - SELALU tampil (hide hanya saat form transaksi fullscreen /
+       form investasi fullscreen).
+
+3.2 ITEM (URUTAN + LABEL EKSAK — CHAT DIGANTI INVESTASI):
+
+     | # | Label       | Ikon          | Route      |
+     |---|-------------|---------------|------------|
+     | 1 | Dashboard   | grid          | dashboard  |
+     | 2 | Detail      | file          | detail     |
+     | 3 | Investasi   | trending-up   | investasi  |
+     | 4 | Plans       | jam           | plans      |
+     | 5 | Settings    | gear          | settings   |
+
+     - "Detail" adalah evolusi "Sheets" (lihat BAGIAN 4).
+     - Chat Bot DIHAPUS TOTAL (R13).
+
+3.3 VISUAL:
+     - Aktif: hijau #22C55E + indicator pill M3.
+     - Non-aktif: #9CA3AF.
+     - Label selalu tampil.
+     - Animasi ikon scale 0.92 -> 1.0, 150 ms.
+     - Haptic saat pindah tab (HapticFeedbackType.TextHandleMove).
+
+3.4 NAVIGASI (WAJIB):
+     - navigate(route) {
+         launchSingleTop = true;
+         restoreState = true;
+         popUpTo(graph.findStartDestination().id) { saveState = true }
+       }
+     - Item aktif dibaca dari currentBackStackEntryAsState()
+       (bukan variabel lokal).
+     - Tiap tab punya back stack sendiri.
+     - Scroll/filter/search layar Detail TERSELAMATKAN saat pindah tab.
+     - Transisi antar tab: fade 180 ms.
+
+3.5 FAB "+" 56 dp (SERAGAM DI SEMUA LAYAR — fix Bug-4):
+     - Posisi bottom-end DI ATAS nav bar (bottom = 80+16 dp).
+     - Hide saat:
+         (a) keyboard muncul (WindowInsets.isImeVisible).
+         (b) form terbuka (transaksi/investasi).
+     - Setiap LazyColumn WAJIB:
+         contentPadding = PaddingValues(bottom = 96.dp).
+       Ini untuk memastikan FAB TIDAK menutupi item terakhir.
+     - FAB kontekstual:
+         - route "dashboard" / "detail" -> buka TransactionFormScreen.
+         - route "investasi" -> buka InvestmentFormScreen (fix Bug-3a).
+         - route "plans" -> sembunyikan (tidak relevan) atau buka
+           "Tambah Plans".
+         - route "settings" -> sembunyikan.
+       Dibaca dari currentRoute (bukan variabel lokal).
+     - FAB long-press (opsional) -> radial menu / bottom sheet:
+         Transaksi, Investasi, Rutinan, Goal, Budget.
+       Contextual: sembunyikan yang tidak relevan di route tertentu.
+
+3.6 DRAWER (hamburger kiri atas) TETAP:
+     - Item sekunder: Akun, Tantangan, Kategori Custom, Achievements,
+       Notifikasi, Export/Import, About.
+     - Chat DIHAPUS dari drawer.
+     - Header: logo + badge Level (lihat BAGIAN 13.2).
+
+--------------------------------------------------------------------------------
+BAGIAN 4 — LAYAR DETAIL (2 MODE)
+--------------------------------------------------------------------------------
+
+4.1 MODE LIST (default):
+     - LazyColumn.
+     - Row 72 dp TINGGI TETAP.
+     - Composable menerima PRIMITIF:
+         icon, title, subtitle, amountText, amountColor.
+     - Tap row -> dialog Edit / Duplikat / Hapus.
+     - Long-press -> bulk select + "Hapus (N)" + konfirmasi menampilkan
+       jumlah.
+
+4.2 MODE TABEL:
+     - Box.horizontalScroll.
+     - Header sticky.
+     - Lebar kolom TETAP:
+         Tgl 88 | Catatan 140 | Kategori 100 | Akun 90 | Jenis 80 |
+         Nominal 110.
+     - Inline edit via dialog per tipe.
+     - Jenis expense<->income boleh diubah.
+     - Jenis ke/dari transfer DILARANG diubah (disable + pesan
+       "hapus & buat ulang").
+     - Gagal -> revert + Snackbar merah.
+     - Kategori custom user muncul di filter & inline edit.
+
+4.3 TOOLBAR:
+     - Search debounce 200 ms.
+     - Filter chips AND + reset.
+     - Toggle mode (List / Tabel).
+     - Export (CSV).
+     - Kelola Kategori (buka layar Kategori Custom — lihat BAGIAN 6.2).
+     - Tambah (FAB juga tersedia).
+
+4.4 FILTER:
+     - Filter diteruskan ke SQL (bukan filter memori).
+     - Filter chips: tipe (expense/income/transfer), kategori (multi),
+       akun (multi), rentang tanggal (preset: 7 hari, 30 hari, bulan
+       ini, bulan lalu, tahun ini, custom).
+     - AND antar kategori filter; OR di dalam kategori yang sama.
+
+4.5 PAGINATION:
+     - Keyset infinite scroll (Q6).
+     - 50 per halaman.
+     - Prefetch saat sisa 5 item.
+     - Footer count (Q7).
+     - Tombol "ke atas" via derivedStateOf.
+
+--------------------------------------------------------------------------------
+BAGIAN 5 — MODUL INVESTASI (INTI v7 — SANGAT RINCI)
+--------------------------------------------------------------------------------
+
+5.1 PRINSIP:
+     - Investasi TERPISAH dari akun reguler (R15).
+     - Uang investasi tidak mengurangi saldo akun.
+     - User mencatatnya sebagai aset di modul ini.
+     - Total Kekayaan = Σ saldo akun (Q1) + Σ nilai investasi net
+       (after gain/loss).
+     - Semua kalkulasi BigDecimal (R16).
+
+5.2 DATA MODEL (Room):
+
+     @Entity("investment_assets")
+     data class InvestmentAsset(
+       @PrimaryKey val id: String,
+       val name: String,
+       val type: String,          // IDX | US | ETF | CRYPTO | GOLD |
+                                  // REKSADANA | DEPOSITO
+       val unit: String,          // lot | shares | coin | gram | rp
+       val quantity: String,      // BigDecimal.toPlainString()
+       val avgBuyPrice: String,   // BigDecimal.toPlainString()
+       val currentPrice: String,  // BigDecimal.toPlainString()
+       val currency: String,      // IDR | USD (default IDR)
+       val createdAt: Long,
+       val updatedAt: Long,
+       // khusus deposito:
+       val depositRate: String?,        // "5.50" artinya 5,50 %
+       val depositStartDate: String?,   // ISO yyyy-MM-dd
+       val depositTenorDays: Int?,
+       val depositAutoRenew: Boolean?,
+       // khusus reksadana:
+       val reksadanaReturnPercent: String?,  // "3.20" artinya 3,20 %
+       // link ke goal (opsional, §5.13):
+       val goalId: String?
+     )
+
+     @Entity("investment_tx")
+     data class InvestmentTx(
+       @PrimaryKey val id: String,   // deterministic
+       val assetId: String,
+       val date: String,             // ISO yyyy-MM-dd
+       val kind: String,             // BUY | SELL | UPDATE_PRICE |
+                                     // DIVIDEND | RENEW
+       val quantity: String,         // BigDecimal
+       val pricePerUnit: String,     // BigDecimal
+       val fee: Long,                // rupiah
+       val note: String?,
+       val createdAt: Long
+     )
+
+     @Entity("investment_notes")
+     data class InvestmentNote(
+       @PrimaryKey val id: String,
+       val assetId: String?,         // null = catatan umum
+       val title: String,
+       val body: String,
+       val tags: String,             // comma-separated
+       val createdAt: Long,
+       val updatedAt: Long
+     )
+
+     @Entity("investment_streak")
+     data class InvestmentStreak(
+       @PrimaryKey val yearMonth: String,  // "2025-01"
+       val txCount: Int,
+       val unlocked: Boolean
+     )
+
+5.3 JENIS INVESTASI & SATUAN (WAJIB):
+
+     | Jenis              | Satuan  | Presisi   | Catatan hitung |
+     |--------------------|---------|-----------|----------------|
+     | Saham Indonesia    | lot     | integer   | 1 lot = 100 lembar. |
+     | Saham AS           | lot     | integer   | Default 1 lot = 1 share (bisa diubah di Settings). |
+     | ETF                | shares  | integer   | Cost = shares x harga. |
+     | Crypto             | coin    | 4 desimal | Cost = coin x harga. |
+     | Emas               | gram    | 3 desimal | Cost = gram x harga. |
+     | Reksa Dana         | Rp      | integer   | Cost = Rp; + persen return opsional. |
+     | Deposito           | Rp      | integer   | Cost = Rp pokok; + persen + tenor hari. |
+
+     DETAIL SAHAM INDONESIA:
+       - Harga yang diinput adalah harga PER LEMBAR.
+       - Minimal pembelian 1 lot = 100 lembar.
+       - User menginput JUMLAH LOT (bukan lembar).
+       - lembar = lot x 100.
+       - Cost = lot x 100 x hargaPerLembar.
+
+       CONTOH WAJIB BENAR (uji INV-1):
+         Harga per lembar = 2.000
+         User beli 5 lot
+         Lembar = 5 x 100 = 500 lembar
+         Cost = 500 x 2.000 = Rp1.000.000
+         Ditampilkan: "5 lot (500 lembar) @ Rp2.000 = Rp1.000.000"
+
+5.4 FORM TAMBAH/EDIT ASET:
+     Field:
+       - Nama aset (text).
+       - Jenis (dropdown: IDX, US, ETF, CRYPTO, GOLD, REKSADANA,
+         DEPOSITO).
+       - Satuan (auto dari jenis, read-only).
+       - Kuantitas (AmountTextField presisi sesuai jenis — lihat §2.4).
+       - Harga Beli per satuan (AmountTextField, presisi sesuai jenis).
+       - Harga Sekarang (opsional, AmountTextField).
+       - Currency (default IDR).
+       - Catatan (opsional).
+
+     Field tambahan khusus DEPOSITO:
+       - Pokok (Rp) — menggantikan "Kuantitas".
+       - Bunga per tahun (%) — BigDecimal 2 desimal.
+       - Tenor (hari) — integer >= 1.
+       - Tanggal mulai — date picker (default hari ini).
+       - Auto-renew? — Switch "Ya, perpanjang otomatis saat jatuh tempo".
+
+     Field tambahan khusus REKSADANA:
+       - Pokok (Rp).
+       - Persen return (%) — opsional.
+
+     VALIDASI:
+       - Nama tidak kosong.
+       - Kuantitas > 0.
+       - Harga >= 0.
+       - Untuk IDX: kuantitas harus integer >= 1.
+       - Untuk DEPOSITO: tenor >= 1, persen > 0.
+       - Untuk REKSADANA: persen boleh 0 atau kosong.
+
+     EDIT:
+       - Semua field bisa diubah (mengantisipasi salah ketik).
+       - Perubahan harga -> catat InvestmentTx(kind=UPDATE_PRICE).
+       - Perubahan kuantitas -> catat InvestmentTx(kind=BUY atau SELL)
+         dengan selisihnya.
+       - Perubahan field lain (nama, jenis) -> update langsung, tidak
+         buat tx.
+       - Tombol Simpan -> validasi -> insert -> kembali ke daftar.
+
+5.5 CARA HITUNG (WAJIB BIGDECIMAL):
+
+     COST BASIS:
+       sumBuy = Σ (BUY.quantity x BUY.pricePerUnit) + Σ (BUY.fee)
+       sumSell = Σ (SELL.quantity x SELL.pricePerUnit) - Σ (SELL.fee)
+       costBasis = sumBuy - sumSell
+
+     NILAI SEKARANG:
+       currentValue = currentQuantity x currentPrice
+
+     GAIN/LOSS:
+       unrealized = currentValue - costBasis
+       realized = Σ (SELL.quantity x (SELL.pricePerUnit - avgBuyAtSell))
+       totalGainLoss = unrealized + realized
+
+     TOTAL KEKAYAAN (net):
+       totalWealth = Σ saldo akun (Q1)
+                     + Σ currentValue (semua aset investasi)
+                     + Σ realized (dari tx SELL)
+
+     CONTOH USER (wajib benar):
+       User catat investasi 1.000.000
+       Nilai sekarang 500.000
+       Maka yang masuk Total Kekayaan = +500.000 (bukan 1.000.000).
+
+     PEMBULATAN:
+       Semua BigDecimal.setScale(2, RoundingMode.HALF_UP) untuk rupiah.
+       Simpan internal dengan presisi penuh; tampilkan dengan skala 2.
+
+5.6 LAYAR INVESTASI — LAYOUT (fix Bug-3):
+
+     Urutan dari atas ke bawah:
+
+     [KARTU TOTAL KEKAYAAN] — STICKY (tidak ikut scroll):
+       Baris 1: "Total Kekayaan"
+                nilai = saldo akun + nilai investasi net.
+       Baris 2 (dalam kartu yang sama): "Total Gain/Loss"
+                nilai = Σ unrealized + Σ realized.
+                warna: hijau bila >= 0, merah bila < 0.
+       (fix Bug-3c: gain/loss digabung ke kartu ini, bukan tabel
+        terpisah.)
+
+     [CHART ASET] — Canvas custom:
+       - Donut/pie dengan label kategori (fix Bug-3e).
+       - Setiap slice: nama jenis + persen.
+       - Legend di bawah chart.
+       - DILARANG menampilkan widget "Distribusi Kekayaan" lama.
+       - Data kosong -> baseline + "Belum ada data".
+
+     [TABEL ASET INVESTASI] — JANGAN dihapus:
+       - Daftar InvestmentAsset dikelompokkan per jenis.
+       - Tiap baris: nama, satuan, kuantitas, harga, nilai, gain/loss.
+       - Tap -> Edit / Hapus.
+
+     [TABEL RIWAYAT INVESTASI] — NEW (fix Bug-3b, Bug-3d):
+       - Header STICKY (stickyHeader di LazyColumn).
+       - Body SCROLL panjang.
+       - Kolom PERSIS:
+           | tanggal | jenis investasi | nama aset | jumlah beli | harga saat beli |
+       - Contoh:
+           | 2025-01-03 | Saham IDX | BBCA  | 5 lot (500 lbr)  | Rp2.000 / lbr        |
+           | 2025-01-05 | Crypto    | BTC   | 0,0004 coin      | Rp700.000.000 / coin |
+           | 2025-01-07 | Emas      | Antam | 0,001 g          | Rp1.200.000 / g      |
+       - Filter: rentang tanggal, jenis, aset.
+       - Tap row -> detail tx + Edit / Hapus.
+
+     [FAB "+" 56 dp] bottom-end di atas nav bar:
+       - contentPadding(bottom=96.dp) di LazyColumn (fix Bug-4).
+       - route "investasi" -> buka InvestmentFormScreen (fix Bug-3a).
+
+5.7 DEPOSITO — AUTO-UPDATE (WAJIB):
+
+     FORM DEPOSITO:
+       - Pokok (Rp).
+       - Bunga per tahun (%) — BigDecimal, mis. 5,50.
+       - Tenor (hari) — integer >= 1, mis. 14.
+       - Tanggal mulai — date picker (default hari ini).
+       - Auto-renew? — Switch "Ya, perpanjang otomatis saat jatuh tempo".
+
+     PERHITUNGAN:
+       bungaPeriode = pokok x (rate/100) x (tenor/365)
+                      (basis hari kalender)
+                      RoundingMode.HALF_UP, 2 desimal.
+       nilaiJatuhTempo = pokok + bungaPeriode.
+       tanggalJatuhTempo = startDate + tenor hari.
+
+     ENGINE AUTO-UPDATE:
+       - DepositAutoRenewWorker / deferred check di AppInitializer.
+       - Saat app dibuka (deferred, sekali per proses, idempoten):
+           Untuk setiap deposito autoRenew=true dengan dueDate <= today:
+             - Buat InvestmentTx(kind=RENEW) dengan nilai baru =
+               nilaiJatuhTempo.
+             - Update asset.quantity = nilaiJatuhTempo.
+             - Update asset.depositStartDate = dueDate (tanggal jatuh
+               tempo sebelumnya).
+             - Update asset.updatedAt = now.
+       - IDEMPOTENCY KEY:
+           id = "dep-{assetId}-{dueDateISO}"
+           Sebelum insert, cek apakah InvestmentTx dengan id tersebut
+           sudah ada. Jika ada, skip (bukti M12).
+       - SUMBER TANGGAL:
+           System.currentTimeMillis() -> format ISO lokal (baca dari HP).
+       - DILARANG pakai WorkManager periodik < 15 menit atau
+         AlarmManager jangka pendek (R-D8).
+       - Loop: sementara dueDate <= today, terus update (jika tenor
+         pendek, misal 14 hari dan app tidak dibuka 30 hari, harus
+         update 2x).
+
+     CONTOH:
+       Deposito 10.000.000, 5,50%, 14 hari, mulai 2025-01-01.
+       Jatuh tempo: 2025-01-15.
+       Bunga: 10.000.000 x 0.055 x (14/365) = 21.095,89.
+       Nilai baru: 10.021.095,89.
+       Bila auto-renew: depositStartDate jadi 2025-01-15, jatuh tempo
+       berikutnya 2025-01-29.
+
+5.8 REKSA DANA — PERSEN:
+     - Form: Pokok (Rp) + Persen return (%) opsional (mis. 3,20).
+     - Nilai sekarang = pokok x (1 + persen/100).
+     - Gain = nilai - pokok.
+     - Bila persen diisi, user tidak perlu input currentPrice.
+     - Bila persen kosong, pakai currentPrice manual.
+
+5.9 DCA CALCULATOR (NEW):
+     - Layar kecil dalam tab Investasi (sub-tab "Kalkulator DCA").
+     - Input:
+         target aset (pilih dari daftar),
+         nominal rutin,
+         frekuensi (mingguan/bulanan),
+         rentang (mis. 12 bulan).
+     - Output:
+         total unit terkumpul (proyeksi),
+         average cost (proyeksi),
+         total investasi.
+     - Tombol "Simpan sebagai Catatan" -> simpan sebagai InvestmentNote
+       ber-tag "DCA" (BUKAN transaksi palsu).
+     - Perhitungan pakai BigDecimal.
+
+5.10 INVESTMENT JOURNAL & NOTES:
+     - InvestmentNote: judul, body (Markdown ringan), tag, assetId?,
+       createdAt, updatedAt.
+     - Sub-tab "Catatan & Riset" di layar Investasi.
+     - List + search + filter tag.
+     - Export nanti (§5.12).
+
+5.11 DIVIDEND TRACKER — KEPUTUSAN JUJUR (R18):
+     - Live auto-fetch dividen dari internet: DILARANG.
+       (Tidak ada API gratis yang andal.)
+     - Diimplementasi sebagai PENCATAT MANUAL:
+         User menambahkan InvestmentTx(kind=DIVIDEND, quantity=0,
+         pricePerUnit=amount, note).
+         Dialog pilihan: kurangi cost basis efektif ATAU tambah cash.
+     - Tidak ada klaim update otomatis.
+     - UI menampilkan total dividen diterima per aset/tahun.
+     - MARKING di kode: manual-only, TODO untuk API.
+
+5.12 EXPORT LAPORAN INVESTASI:
+     - Tombol di toolbar Investasi -> CSV ";" + BOM.
+     - Kolom: tanggal;jenis;nama_aset;jumlah_beli;satuan;
+              harga_saat_beli;nilai;gain_loss.
+     - Konsisten dengan ekspor transaksi (LAMPIRAN B poin 9).
+     - Opsi PDF ringkas (opsional, STUB jika tidak sempat).
+
+5.13 GOAL-BASED INVESTING:
+     - Di InvestmentAsset, tambah link opsional ke Goal (goalId).
+     - Bila diset, progres goal otomatis dari nilai aset terkait.
+     - UI: badge di kartu goal "Terkait investasi: BBCA".
+
+5.14 INVESTMENT SIMULATOR (NEW):
+     - Layar kecil: input jenis, nominal, proyeksi return tahunan,
+       durasi -> output tabel compounding tahunan.
+     - Hasil bisa disimpan sebagai InvestmentNote tag "SIMULASI".
+
+5.15 INVESTMENT STREAKS (BULANAN, bukan harian):
+     - InvestmentStreak: hitung bulan berturut-turut user mencatat
+       minimal 1 tx investasi.
+     - Tampil sebagai kalender bulanan (12 bulan terakhir) di
+       sub-tab "Streak".
+     - Badge di header Investasi: "🔥 3 bulan".
+
+5.16 DIVIDEND REINVESTMENT PLANNER:
+     - Bila user menerima dividen dan memilih "Reinvest", otomatis
+       buat InvestmentTx(BUY) untuk aset yang sama dengan nominal
+       dividen (setelah konfirmasi).
+
+5.17 BUKTI MODUL INVESTASI:
+     - Unit test kalkulasi:
+         - Saham IDX (5 lot @2.000 = Rp1.000.000 / 500 lembar).
+         - Crypto 0,0004 BTC @ Rp700.000.000 = Rp280.000.
+         - Emas 0,001 g @ Rp1.200.000 = Rp1.200.
+         - Deposito 14 hari 5,50% (RoundingMode.HALF_UP).
+         - Reksa Dana 3,20%.
+     - Screenshot tabel riwayat sticky header.
+     - Screenshot chart dengan label kategori.
+     - Logcat DEPOSIT_RENEW idempoten saat M12.
+     - Screenshot edit aset (mengantisipasi typo) berhasil.
+     - Screenshot DB inspector: kolom quantity = "0.001" (String
+       BigDecimal), bukan 0.001 (Double).
+
+5.18 EDGE CASE INVESTASI (WAJIB DIUJI):
+     - Kuantitas 0 -> tolak, error message.
+     - Harga 0 -> boleh (mis. aset gratis), tapi gain/loss = -cost.
+     - Persen deposito 0 -> tolak (harus > 0).
+     - Tenor deposito 0 -> tolak.
+     - Jual lebih banyak dari yang dimiliki -> tolak.
+     - Hapus aset yang punya tx -> konfirmasi "Hapus juga riwayat?".
+     - Edit aset yang punya tx -> update tx lama atau tambah tx baru?
+       KEPUTUSAN: tambah tx baru (UPDATE_PRICE), biarkan history.
+     - Kuantitas sangat besar (mis. 1.000.000 lot) -> pastikan tidak
+       overflow Long/BigDecimal.
+     - Harga sangat besar (mis. 1.000.000.000.000) -> BigDecimal aman.
+     - Emas 0,0000001 gram -> di-truncate ke 3 desimal (0,000) ->
+       TOLAK karena <= 0 setelah truncate? atau simpan presisi penuh?
+       KEPUTUSAN: simpan presisi penuh di DB, tampilkan 3 desimal.
+     - Crypto 0,00001 -> sama.
+     - Deposito auto-renew dengan tenor 0 -> tolak di form.
+
+--------------------------------------------------------------------------------
+BAGIAN 6 — BUDGET ALERT, KATEGORI CUSTOM, & EMOJI PICKER
+--------------------------------------------------------------------------------
+
+6.1 BUDGET ALERT CONFIGURABLE:
+     - Tiap budget punya field:
+         alertThresholdPercent: Int?  (default null)
+         alertAtRemaining: Long?      (default null)
+     - User isi salah satu / keduanya.
+     - Saat:
+         terpakai >= (100 - alertThresholdPercent)%
+         ATAU sisa <= alertAtRemaining
+       -> notifikasi lokal (NotificationCompat, channel "budget_alert")
+       + highlight merah di kartu budget dashboard.
+     - Cek dilakukan deferred setelah app dibuka (sekali per proses,
+       idempoten via lastAlertDate per budget).
+     - READ-ONLY ke DB, tidak INSERT tx (R-D8).
+     - Contoh: budget 500rb, alertThresholdPercent = 20 -> peringatan
+       saat terpakai >= 400rb (80%).
+       Atau alertAtRemaining = 100.000 -> peringatan saat sisa <= 100rb.
+     - Global setting: budgetAlertGlobal (Boolean, default true) untuk
+       matikan semua.
+
+6.2 KATEGORI CUSTOM + EMOJI PICKER:
+     - Layar "Kelola Kategori" (dari drawer atau toolbar Detail).
+     - Tambah/edit/hapus kategori user.
+     - Field: nama (string), ikon (Emoji Picker), warna (opsional),
+       tipe (expense/income/both).
+     - Kategori default TIDAK BISA dihapus (hanya disable).
+     - Kategori user BISA dihapus dengan warning bila ada tx.
+     - DB: categories + isSystem: Boolean + emoji: String (bisa >1
+       codepoint).
+
+     EMOJI PICKER:
+       - Grid bawaan >= 400 emoji, di-bundle lokal, tanpa lib eksternal.
+       - Dikelompokkan:
+           Makanan, Transportasi, Belanja, Hiburan, Kesehatan,
+           Edukasi, Rumah, Keuangan, Olahraga, Travel, Hewan, Simbol,
+           Pekerjaan, Hadiah, Teknologi, Alam, Emosi, dsb.
+       - Search by kata kunci Indonesia + Inggris.
+       - Contoh keyword:
+           "makan" -> 🍔 🍕 🍜 🍱
+           "kopi" -> ☕ 🥤
+           "transport" -> 🚗 🚌 🚆 ✈️
+           "belanja" -> 🛒 🛍️ 💳
+           "gaji" -> 💰 💵 🏦
+           "investasi" -> 📈 📊 💹
+       - Emoji bisa multi-codepoint (mis. 👨‍💻, 🏳️‍🌈).
+       - Simpan sebagai String UTF-8 di Room.
+
+6.3 BUKTI:
+     - Screenshot emoji picker + kategori custom tersimpan & muncul di
+       form transaksi.
+     - Screenshot budget alert muncul di status bar.
+     - Unit test: keyword search "makan" mengembalikan >= 4 emoji.
+
+--------------------------------------------------------------------------------
+BAGIAN 7 — RUTINAN (DULU "RECURRING") — TAMBAH OPSI TAHUNAN
+--------------------------------------------------------------------------------
+
+7.1 PERUBAHAN:
+     - Label UI berubah ke "Rutinan" (semua string & navigasi).
+     - Nama fungsi/kelas boleh tetap "Recurring" di kode, tapi UI
+       selalu "Rutinan".
+     - Frekuensi: Harian, Mingguan, Bulanan, TAHUNAN (baru).
+
+7.2 MODEL:
+     @Entity("recurrings")
+     data class Recurring(
+       @PrimaryKey val id: String,
+       val title: String,
+       val type: String,        // expense | income | transfer
+       val amount: Long,
+       val categoryId: String?,
+       val accountId: String,
+       val toAccountId: String?,
+       val frequency: String,   // DAILY | WEEKLY | MONTHLY | YEARLY
+       val anchorDay: Int?,     // untuk MONTHLY & YEARLY
+       val anchorMonth: Int?,   // untuk YEARLY (1-12)
+       val nextDue: String,     // ISO date
+       val autoPost: Boolean,
+       val active: Boolean,
+       val note: String?
+     )
+
+7.3 PERHITUNGAN NEXT DUE:
+     - DAILY: +1 hari.
+     - WEEKLY: +7 hari.
+     - MONTHLY: pakai TemporalAdjusters + anchorDay.
+       Clamp: 31 -> 30/28 (Feb).
+     - YEARLY: pakai anchorMonth + anchorDay.
+       Clamp: 29 Feb -> 28 Feb pada tahun non-kabisat.
+     - Semua pakai java.time.LocalDate + ZoneId.systemDefault().
+
+7.4 ID DETERMINISTIK:
+     - rec-{id}-{dateISO}
+     - Contoh: rec-abc123-2025-01-15.
+     - Dicek sebelum insert (idempotent).
+
+7.5 AUTO-POST:
+     - Deferred setelah first frame, sekali per proses.
+     - while (nextDue <= today) -> insert tx -> nextDue += 1 periode.
+     - Restart = 0 duplikat (uji V7).
+
+7.6 CONTOH TAHUNAN:
+     - Rutinan "Bayar pajak" setiap 1 April.
+     - anchorMonth = 4, anchorDay = 1.
+     - nextDue = 2025-04-01 -> post -> 2026-04-01 -> dst.
+
+--------------------------------------------------------------------------------
+BAGIAN 8 — LAPISAN DATA (SUMBER LAG #1)
+--------------------------------------------------------------------------------
+
+8.1 PRINSIP:
+     - Semua angka untuk UI = SQL.
+     - Baca = Flow + distinctUntilChanged.
+     - Tulis massal = @Transaction.
+     - Keyword challenge: fetch kategori+periode dulu (kecil, via indeks)
+       lalu LIKE di Kotlin.
+
+8.2 QUERY WAJIB (DAO; sesuaikan nama kolom, jangan ubah semantik):
+
+     Q1 saldo akun (1 query):
+       SELECT a.id, a.name, a.icon, a.openingBalance,
+         a.openingBalance
+         + COALESCE(SUM(CASE WHEN t.type='income'   AND t.accountId   = a.id THEN t.amount ELSE 0 END),0)
+         + COALESCE(SUM(CASE WHEN t.type='transfer' AND t.toAccountId = a.id THEN t.amount ELSE 0 END),0)
+         - COALESCE(SUM(CASE WHEN t.type='expense'  AND t.accountId   = a.id THEN t.amount ELSE 0 END),0)
+         - COALESCE(SUM(CASE WHEN t.type='transfer' AND t.accountId   = a.id THEN t.amount ELSE 0 END),0)
+         AS balance
+       FROM accounts a LEFT JOIN transactions t
+         ON (t.accountId = a.id OR t.toAccountId = a.id)
+       GROUP BY a.id
+
+     Q2 ringkasan rentang:
+       SELECT type, SUM(amount)
+       FROM transactions
+       WHERE date BETWEEN :from AND :to AND type != 'transfer'
+       GROUP BY type
+
+     Q3 top kategori:
+       SELECT c.id, c.name, c.icon, SUM(t.amount) total
+       FROM transactions t JOIN categories c ON c.id = t.categoryId
+       WHERE t.date BETWEEN :from AND :to AND t.type = 'expense'
+       GROUP BY c.id
+       ORDER BY total DESC
+       LIMIT 6
+
+     Q4 bucket cashflow:
+       SELECT date,
+         SUM(CASE WHEN type='income'  THEN amount ELSE 0 END) income,
+         SUM(CASE WHEN type='expense' THEN amount ELSE 0 END) expense
+       FROM transactions
+       WHERE date BETWEEN :from AND :to AND type != 'transfer'
+       GROUP BY date
+       ORDER BY date
+       (rentang > 31 hari: GROUP BY substr(date,1,7))
+
+     Q5 recent 8:
+       SELECT rowid, t.id, t.type, t.note, t.date, t.amount,
+              t.accountId, t.toAccountId, c.icon catIcon
+       FROM transactions t
+       LEFT JOIN categories c ON c.id = t.categoryId
+       ORDER BY t.date DESC, rowid DESC
+       LIMIT 8
+
+     Q6 keyset pagination:
+       (halaman pertama: lastDate='9999-12-31',
+        lastRowid=9223372036854775807)
+       SELECT rowid, *
+       FROM transactions
+       WHERE (:q IS NULL OR note LIKE '%' || :q || '%')
+         AND (:type IS NULL OR type = :type)
+         AND (:cat IS NULL OR categoryId = :cat)
+         AND (:acc IS NULL OR accountId = :acc)
+         AND (date < :lastDate OR (date = :lastDate AND rowid < :lastRowid))
+       ORDER BY date DESC, rowid DESC
+       LIMIT 50
+
+     Q7 count terfilter (footer):
+       SELECT COUNT(*)
+       FROM transactions
+       WHERE (:q IS NULL OR note LIKE '%' || :q || '%')
+         AND (:type IS NULL OR type = :type)
+         AND (:cat IS NULL OR categoryId = :cat)
+         AND (:acc IS NULL OR accountId = :acc)
+
+     Q8 budget:
+       SELECT SUM(amount)
+       FROM transactions
+       WHERE type = 'expense'
+         AND categoryId = :cat
+         AND date >= :cycleStart
+         AND date <  :cycleEnd
+
+     Q9 baseline ReducePercent:
+       SELECT COALESCE(SUM(amount),0) / 30.0 AS avgDaily
+       FROM transactions
+       WHERE type = 'expense'
+         AND categoryId = :cat
+         AND date <  :start
+         AND date >= :startMinus30
+
+     Q10 total investasi per jenis:
+       SELECT type,
+              SUM(CAST(quantity AS REAL) * CAST(currentPrice AS REAL))
+       FROM investment_assets
+       GROUP BY type
+       -- dikembalikan sebagai pasangan (String, String)
+       -- dan dikonversi ke BigDecimal di VM.
+
+     Q11 gain/loss total:
+       -- dihitung di Kotlin dari hasil Q10 + cost basis (BigDecimal, VM)
+       -- BUKAN SQL float.
+
+     Q12 riwayat investasi keyset:
+       SELECT *
+       FROM investment_tx
+       WHERE (:type IS NULL OR :type = kind)
+         AND (date < :lastDate OR (date = :lastDate AND rowid < :lastRowid))
+       ORDER BY date DESC, rowid DESC
+       LIMIT 50
+
+     Q13 deposito jatuh tempo:
+       SELECT *
+       FROM investment_assets
+       WHERE type = 'DEPOSITO'
+         AND depositAutoRenew = 1
+         AND date(depositStartDate, '+' || depositTenorDays || ' days') <= :today
+
+8.3 INDEKS (Migration, naikkan versi DB — JANGAN destructive):
+     idx_tx_date(date);
+     idx_tx_account(accountId);
+     idx_tx_cat_date(categoryId, date);
+     idx_tx_type_date(type, date);
+     idx_tx_to_account(toAccountId);
+     idx_deposit_goal(goalId);
+     idx_inv_tx_date(date);
+     idx_inv_tx_asset(assetId);
+     idx_inv_deposit_due(type, depositStartDate, depositTenorDays);
+
+8.4 PROOF:
+     - EXPLAIN QUERY PLAN untuk Q1-Q13.
+     - Hanya boleh "SEARCH ... USING INDEX".
+     - Ada "SCAN" pada tabel transactions / investment_tx = GAGAL.
+     - Sertakan output di laporan fase.
+
+8.5 GENERATOR DEBUG:
+     - "10.000 transaksi" + "1.000 investasi".
+     - Hanya buildType == DEBUG.
+     - Tombol hidden di Settings.
+     - Batch @Transaction per 500.
+     - Target < 3 detik.
+     - Log waktu eksekusi.
+
+8.6 PARITAS:
+     - Unit test hasil Q1-Q4 IDENTIK dengan implementasi lama pada
+       dataset dummy (jaminan R1).
+
+8.7 MIGRATION:
+     - Setiap perubahan skema = Migration eksplisit.
+     - Contoh Migration v1->v2:
+         - Buat tabel investment_assets, investment_tx,
+           investment_notes, investment_streak.
+         - Tambah kolom alertThresholdPercent, alertAtRemaining di
+           budgets.
+         - Drop tabel chat_messages (R13).
+         - Tambah kolom emoji, isSystem di categories.
+     - Semua Migration diuji dengan MigrationTestHelper.
+
+--------------------------------------------------------------------------------
+BAGIAN 9 — LAPISAN STATE (SUMBER LAG #2)
+--------------------------------------------------------------------------------
+
+9.1 7 VIEWMODEL:
+     - DashboardVM
+     - DetailVM
+     - InvestasiVM (menggantikan ChatVM)
+     - PlansVM
+     - SettingsVM
+     - FormVM
+     - ChallengeVM
+
+     Repository via AppContainer.
+
+9.2 POLA:
+     combine(...).map { buildUiState() }
+       .distinctUntilChanged()
+       .flowOn(Dispatchers.Default)
+       .stateIn(viewModelScope,
+                SharingStarted.WhileSubscribed(5000),
+                initial)
+
+9.3 UiState:
+     - @Immutable data class.
+     - Hanya field layar itu.
+     - TANPA entity Room.
+     - Format nominal -> String saat build di VM (R14).
+
+9.4 EVENT:
+     - Toast/dialog/snackbar/animasi via Channel + receiveAsFlow.
+     - Dikonsumsi LaunchedEffect sekali.
+
+9.5 DILARANG:
+     - mutableStateOf dalam UiState.
+     - Satu UiState lintas 5 layar.
+
+9.6 CONTOH DashboardUiState:
+     data class DashboardUiState(
+       val isLoading: Boolean,
+       val totalBalanceText: String,
+       val incomeText: String,
+       val expenseText: String,
+       val netText: String,
+       val buckets: List<BarBucket>,
+       val topCats: List<CategorySummary>,
+       val recent: List<TxRowUi>,
+       val habit: HabitUi?,
+       val challengeCard: ChalCardUi?,
+       val rangeLabel: String,
+       val budgetAlerts: List<BudgetAlertUi>,
+       val investmentSummary: InvestSummaryUi?  // Total Kekayaan
+     )
+
+9.7 CONTOH InvestasiUiState:
+     data class InvestasiUiState(
+       val isLoading: Boolean,
+       val totalWealthText: String,
+       val gainLossText: String,
+       val gainLossPositive: Boolean,
+       val chartSlices: List<ChartSlice>,
+       val assetsGrouped: List<AssetGroupUi>,
+       val history: List<InvestHistoryRowUi>,
+       val notes: List<NoteUi>,
+       val streakMonths: List<StreakMonthUi>,
+       val dcaSummary: DcaSummaryUi?,
+       val empty: Boolean
+     )
+
+--------------------------------------------------------------------------------
+BAGIAN 10 — LAPISAN UI (SUMBER LAG #3)
+--------------------------------------------------------------------------------
+
+10.1 LAZYCOLUMN:
+      - items(key = { it.id }, contentType = { "tx_row" }).
+      - contentPadding = PaddingValues(bottom = 96.dp) — fix Bug-4.
+
+10.2 REMEMBER & DERIVEDSTATEOF:
+      - remember untuk formatter/Paint/lambda.
+      - derivedStateOf untuk FAB visibility, tombol ke-atas, sticky
+        header.
+
+10.3 TARGET RECOMPOSE (buktikan Layout Inspector):
+      - Mengetik di ChatBot -> DIHAPUS, tidak relevan.
+      - Dashboard idle < 5 recomposition.
+      - Buka form investasi -> hanya form recompose.
+      - Buka emoji picker -> hanya picker recompose.
+
+10.4 CHART CANVAS CUSTOM:
+      - Data List<BarBucket> atau List<ChartSlice> primitif.
+      - Paint/Path di-remember.
+      - NOL alokasi objek dalam draw lambda.
+      - Animasi sekali per perubahan data
+        (LaunchedEffect(keys = buckets)) 300 ms.
+      - Data kosong -> baseline + "Belum ada data".
+
+10.5 CHART INVESTASI (fix Bug-3e):
+      - Setiap slice diberi teks nama jenis + persen.
+      - Legend di bawah chart (bukan hanya warna).
+      - Contoh:
+          [donut chart]
+          ● Saham IDX   45%
+          ● Crypto      30%
+          ● Emas        15%
+          ● Reksadana   10%
+
+10.6 GRAPHICSLAYER:
+      - Untuk animasi.
+      - Modifier.background sebelum padding.
+
+10.7 INSETS:
+      - imePadding untuk form/chat (chat dihapus, form tetap).
+      - navigationBarsPadding konten.
+      - Edge-to-edge.
+
+10.8 PULL-TO-REFRESH:
+      - Material 3 PullToRefreshBox.
+      - Refresh manual dari Flow (tidak ada fetch jaringan; hanya
+        re-read Room + cek deposit due + budget alert).
+
+10.9 GESTURE NAVIGATION:
+      - Swipe kiri/kanan di Detail -> pindah tab.
+      - Edge-to-edge mengikuti WindowInsets.
+
+10.10 ADAPTIVE LAYOUT:
+      - Tablet (>= 600 dp) -> NavigationRail + 2 kolom Detail/Investasi.
+      - Handphone -> NavigationBar.
+
+--------------------------------------------------------------------------------
+BAGIAN 11 — STARTUP & BUILD
+--------------------------------------------------------------------------------
+
+11.1 APPLICATION.ONCREATE:
+      - HANYA AppContainer + Room.build (satu instance, satu nama).
+      - NOL query/seed/scheduler.
+
+11.2 DEFERRED INIT:
+      - Engine Rutinan + scheduler tantangan + AppInitializer +
+        DepositAutoRenew check + BudgetAlert check.
+      - Deferred setelah first frame:
+          repeatOnLifecycle(RESUMED) + delay(300).
+      - Guard sekali per proses (AtomicBoolean di Application).
+
+11.3 SPLASH:
+      - androidx.core:core-splashscreen.
+      - Exit conditional.
+      - Non-blocking.
+
+11.4 GRADLE.PROPERTIES:
+      - Caching, parallel, nonTransitiveRClass.
+
+11.5 RELEASE:
+      - minify + shrinkResources + R8.
+      - Module :baseline-profile + profileinstaller.
+      - Compose compiler metrics sekali, laporkan % skippable.
+
+11.6 STRICTMODE DEBUG:
+      - enableDefaults().
+      - 0 violation (bukti logcat).
+
+11.7 OFFLINE MODE:
+      - Default: tidak ada panggilan jaringan.
+      - Jika kelak ada sync, pakai WorkManager dengan constraint
+        NETWORK_CONNECTED.
+      - Sekarang: TIDAK ADA jaringan sama sekali (jujur, R18).
+
+--------------------------------------------------------------------------------
+BAGIAN 12 — POLISH RINGAN
+--------------------------------------------------------------------------------
+
+12.1 HAPTIC:
+      - Saat simpan transaksi / Berani / XP masuk / level up /
+        tambah investasi / edit aset.
+      - HapticFeedbackType.LongPress untuk aksi destruktif.
+
+12.2 CONFETTI:
+      - Canvas custom maks 30 partikel, 1,2 dtk, auto-dispose.
+      - Tanpa library eksternal.
+
+12.3 SKELETON SHIMMER:
+      - Dashboard saat isLoading pertama.
+      - Juga di layar Investasi.
+
+12.4 SETTINGS:
+      - Toggle "Mode AMOLED" (bg #000000, surface #0A0A0A, instan).
+      - Toggle "Privacy Mode" (§13.6).
+      - Toggle "Biometric Lock" (§13.5).
+      - Toggle "Budget Alert Global".
+      - Tombol "Load Dummy Data".
+      - Tombol "Reset Semua Data".
+      - Tombol "Hapus Akun & Data" (§13.8).
+      - Tombol "Generator 10.000 transaksi" (DEBUG only).
+      - Tombol "Export CSV" / "Export JSON" / "Import JSON".
+
+12.5 PRESS SCALE:
+      - 0.98 kartu + ripple bounded.
+
+12.6 STRINGS:
+      - Semua teks -> strings.xml (values-id, values-en).
+
+--------------------------------------------------------------------------------
+BAGIAN 13 — FITUR TAMBAHAN (DARI DAFTAR USER)
+--------------------------------------------------------------------------------
+
+13.1 ACHIEVEMENT SYSTEM (DIKEMBANGKAN BESAR):
+      - >= 40 achievement kategori:
+          PEMULA (8):
+            - First transaction.
+            - First budget.
+            - First goal.
+            - First investasi.
+            - First Rutinan.
+            - First kategori custom.
+            - First export CSV.
+            - First ganti tema.
+          KONSISTENSI (6):
+            - 7 hari berturut catat.
+            - 30 hari.
+            - 90 hari.
+            - 365 hari.
+            - 30 hari budget tidak lewat.
+            - 30 hari investasi (bulanan).
+          INVESTASI (10):
+            - First buy saham IDX.
+            - First buy crypto.
+            - First buy emas.
+            - First buy reksadana.
+            - First deposito.
+            - Portofolio Rp10jt.
+            - Portofolio Rp100jt.
+            - 3 jenis aset berbeda.
+            - DCA 3 bulan.
+            - 5 aset berbeda.
+          MENABUNG (6):
+            - Streak 7 hari.
+            - Target goal pertama tercapai.
+            - Total tabungan Rp10jt.
+            - Total tabungan Rp100jt.
+            - 5 goal sekaligus.
+            - Goal Rp1M.
+          TANTANGAN (4):
+            - Menang tantangan pertama.
+            - Menang 10 tantangan.
+            - XP 1000.
+            - Level 10.
+          EKSPLORASI (6):
+            - Semua tab dibuka.
+            - Kategori custom dibuat.
+            - Tema diubah.
+            - Export CSV.
+            - Export JSON.
+            - QR share.
+
+      - Setiap achievement:
+          id, judul, deskripsi, ikon, tanggal unlock, reward XP.
+      - Layar "Achievements" dari drawer.
+      - Progress bar per achievement.
+      - Cek unlock: fungsi murni Kotlin dari snapshot DB (bukan
+        trigger SQL rumit).
+      - Confetti + dialog singkat saat unlock.
+
+13.2 LEVEL UP SYSTEM:
+      - XP -> Level:
+          xpRequired(level) = 100 x level^1.5 (dibulatkan).
+      - Gambaran pertumbuhan:
+          ikon pohon bertingkat:
+            🌱 Level 1-4
+            🌿 Level 5-9
+            🪴 Level 10-19
+            🌳 Level 20-39
+            🌲 Level 40+
+      - Progress bar di header drawer + di Plans.
+      - Haptic + animasi saat naik level.
+
+13.3 MILESTONE CELEBRATIONS:
+      - Total tabungan kelipatan Rp1jt/Rp10jt/Rp100jt ->
+        confetti + dialog singkat.
+      - Investasi kelipatan Rp1jt/Rp10jt -> idem.
+      - Streak kelipatan 7/30/100 hari -> idem.
+
+13.4 INVESTMENT JOURNAL: lihat §5.10.
+13.5 INVESTMENT STREAK CALENDAR: lihat §5.15.
+
+13.5 BIOMETRIC LOCK / QUICK ACCESS:
+      - androidx.biometric:biometric.
+      - Toggle di Settings "Kunci aplikasi".
+      - Bila aktif: prompt BiometricPrompt saat cold start.
+      - Fallback PIN perangkat.
+      - TIDAK menyimpan kredensial; hanya gate UI.
+
+13.6 PRIVACY MODE:
+      - Toggle di Settings / quick toggle.
+      - Menyembunyikan semua nominal di UI (tampil "Rp••••••").
+      - Disimpan di DataStore.
+      - Berlaku di Dashboard, Detail, Investasi, Plans.
+
+13.7 MULTI-USER SUPPORT:
+      - Sederhana: profil lokal (nama + avatar + preferensi).
+      - Satu DB, kolom profileId di tabel utama.
+      - Switch profil dari drawer.
+      - DILARANG klaim sync cloud (R18).
+
+13.8 DATA EXPORT & DELETION (GDPR-style):
+      - Ekspor CSV (§5.12) + JSON backup lengkap
+        (Room -> JSON via kotlinx.serialization).
+      - Deletion:
+          - "Reset Semua Data" (§1.2C): tidak hapus app_initialized.
+          - "Hapus akun & data": hapus SEMUA termasuk DataStore
+            (termasuk app_initialized). Didokumentasikan eksplisit.
+      - Konfirmasi 2x untuk deletion.
+
+13.9 CALENDAR SYNC / INTEGRATION:
+      - Export .ics (RFC 5545) untuk jatuh tempo Rutinan, Deposito,
+        Goal target date, Tagihan.
+      - Tombol "Tambahkan ke Kalender" pada kartu jatuh tempo ->
+        intent Intent.ACTION_INSERT ke CalendarContract
+        (izin READ_CALENDAR/WRITE_CALENDAR diminta runtime).
+      - TIDAK ada two-way sync (butuh akun Google) — STUB.
+
+13.10 WIDGET HOME SCREEN:
+      - Glance App Widget: saldo total + total kekayaan + tombol
+        "Catat" (deep-link ke form).
+      - Update via WorkManager periodik 30 menit (batas minimum
+        Android) + updatePeriodMillis.
+
+13.11 NOTIFICATION CENTER:
+      - Layar "Notifikasi" dari drawer: semua notifikasi (budget
+        alert, deposito jatuh tempo, rutinan jatuh tempo, achievement)
+        dengan tanggal + aksi.
+      - Room table notification_log.
+      - Reset TIDAK menyentuh log; dokumentasikan.
+
+13.12 QR CODE SHARING:
+      - BUKAN data pribadi.
+      - QR berisi deep-link financetracker://share?type=invite atau
+        template kategori (user bisa share kategori custom).
+      - Untuk ekspor data -> arahkan user ke CSV/JSON (QR terlalu
+        kecil).
+
+13.13 SMART CATEGORIZATION:
+      - Rule-based keyword -> kategori
+        (mis. "makan", "kopi", "gofood" -> Makanan).
+      - Tidak pakai ML.
+      - Saat user ketik catatan di form, kategori disarankan otomatis
+        (chip di bawah field).
+      - Belajar dari koreksi user: simpan keyword_history.
+
+13.14 ANOMALY DETECTION:
+      - Rule-based: tx > 3x rata-rata kategori (30 hari terakhir) ->
+        Snackbar kuning "Pengeluaran ini lebih besar dari biasanya".
+
+13.15 QUICK ACTIONS / CONTEXTUAL QUICK ACTIONS /
+      FLOATING ACTION MENU:
+      - FAB long-press -> radial menu: Transaksi, Investasi, Rutinan,
+        Goal, Budget (contextual: sembunyikan yang tidak relevan di
+        route tertentu).
+      - Shortcut Android ShortcutManager (long-press ikon app):
+          "Catat pengeluaran", "Catat investasi".
+
+13.16 HAPTIC FEEDBACK PATTERNS (ENHANCEMENT):
+      - Definisi pattern:
+          SAVE     (single tick)
+          ERROR    (double tick)
+          MILESTONE (triple)
+          DELETE   (long)
+      - Semua via HapticFeedback/Vibrator.
+
+13.17 ONBOARDING TOUR:
+      - 3-5 langkah saat first-run (setelah empty state):
+          kenalan tab, cara tambah tx, cara tambah investasi.
+      - Skip button.
+      - Disimpan flag onboarding_done di DataStore.
+
+13.18 THEMING SYSTEM / DARK-LIGHT PER SECTION:
+      - Theme: Light / Dark / AMOLED / System.
+      - Per-section: tabel bisa diset "Zebra rows" opsional; chart
+        tetap warna brand.
+
+13.19 ACCESSIBILITY (A11Y):
+      - contentDescription semua ikon.
+      - Semantics.
+      - TalkBack audit.
+      - Kontras WCAG AA.
+      - Target sentuh >= 48 dp.
+
+13.20 I18N:
+      - values-id, values-en.
+      - Semua string, format tanggal/nominal via locale.
+
+13.21 TESTING:
+      - Unit test:
+          kalkulasi (IDX, emas, crypto, deposito),
+          paritas Q1-Q4,
+          format angka.
+      - Integration test: Room + Repository.
+      - UI test (Compose): flow tambah tx, tambah investasi, reset.
+      - Macrobenchmark: startup, scroll 10k, switch tabs.
+      - MigrationTestHelper.
+
+13.22 ERROR BOUNDARY / CRASH REPORTING:
+      - Thread.setDefaultUncaughtExceptionHandler ->
+        tulis ke file log lokal (opsional kirim via share).
+      - Tidak pakai SDK pihak ketiga (offline).
+
+13.23 SERVICE WORKER / OFFLINE-FIRST ->
+      padanan Android: WorkManager + Room sebagai source of truth.
+      Tidak ada klaim Service Worker (R17).
+
+13.24 ANALYTICS & MONITORING:
+      - TIDAK pakai SDK pihak ketiga.
+      - Log lokal untuk debug.
+      - Debug build: tampilkan statistik sederhana di Settings
+        (jumlah tx, ukuran DB, waktu query terakhir).
+
+--------------------------------------------------------------------------------
+BAGIAN 14 — BENCHMARK & VERIFIKASI
+--------------------------------------------------------------------------------
+
+14.1 MODULE :benchmark (MACROBENCHMARK):
+      Laporan tabel [Test | Metrik | Nilai | Target | PASS/FAIL]:
+        startupCold               <= 800 ms
+        startupWarm               <= 350 ms
+        scrollDetail10k           janky < 1%, P99 <= 22 ms
+        scrollInvestasi1k         janky < 1%
+        switchTabs20x             0 frame > 32 ms
+
+14.2 MANUAL:
+      V1  EXPLAIN: 0 SCAN pada tabel besar.
+      V2  StrictMode: 0 violation.
+      V3  LeakCanary: 0 leak (5 tab x10 + form + form investasi).
+      V4  Layout Inspector: recompose targets.
+      V5  PSS < 150 MB.
+      V6  State tab terselamatkan.
+      V7  Rutinan idempoten (restart x2).
+      V8  Matriks M1-M12 SEMUA PASS — syarat utama.
+      V9  Format angka: 5 kasus R14 + emas 0,001 + crypto 0,0001.
+      V10 Chart investasi berlabel kategori.
+      V11 Edit aset tersimpan (mengantisipasi typo).
+      V12 FAB tidak menutupi item terakhir (scroll ke bawah ->
+          tombol hapus terlihat).
+
+14.3 BUKTI SETIAP FASE:
+      - Logcat (disaring dengan tag yang relevan).
+      - Screenshot (empty state, form, tabel, chart, dialog).
+      - Angka (waktu startup, jank %, jumlah recomposition).
+      - EXPLAIN QUERY PLAN output.
+
+--------------------------------------------------------------------------------
+BAGIAN 15 — URUTAN KERJA
+--------------------------------------------------------------------------------
+
+FASE H — HOTFIX DATA (PALING AWAL, WAJIB):
+  H1: D0 diagnosis -> laporan -> BERHENTI.
+  H2: implement §1.2 (AppInitializer, Reset, anti-pola, log SEED).
+  H3: buktikan M1-M12 (tabel + bukti) -> STATUS -> BERHENTI.
+
+FASE I — FORMAT ANGKA (§2).
+  Bukti R14 -> STATUS -> BERHENTI.
+
+FASE J — MODUL INVESTASI (§5).
+  Model, form, layar, chart, tabel riwayat, deposito auto-update,
+  DCA, notes, export -> STATUS -> BERHENTI.
+
+FASE K — BOTTOM NAV & DETAIL (§3, §4).
+  Chat dihapus, Investasi ditambah, FAB fix -> STATUS -> BERHENTI.
+
+FASE L — BUDGET ALERT + KATEGORI CUSTOM (§6).
+  -> STATUS -> BERHENTI.
+
+FASE M — RUTINAN + TAHUNAN (§7).
+  -> STATUS -> BERHENTI.
+
+FASE N — DATA LAYER (§8).
+  Q1-Q13, indeks, keyset, generator, paritas, EXPLAIN
+  -> STATUS -> BERHENTI.
+
+FASE O — STATE LAYER (§9).
+  7 VM + UiState + events -> STATUS -> BERHENTI.
+
+FASE P — UI (§10).
+  Recompute fixes, chart canvas, insets, pull-to-refresh, adaptive
+  -> STATUS -> BERHENTI.
+
+FASE Q — STARTUP & BUILD (§11).
+  Deferred init, splash, R8, baseline profile, StrictMode
+  -> STATUS -> BERHENTI.
+
+FASE R — POLISH + FITUR TAMBAHAN (§12, §13).
+  Achievements, biometric, privacy, multi-user, widget, notif center,
+  dsb. -> STATUS -> BERHENTI.
+
+FASE S — BENCHMARK & VERIFIKASI (§14)
+  + REGRESI LAMPIRAN C
+  + M1-M12 final
+  + README
+  -> STATUS FINAL -> BERHENTI.
+
+--------------------------------------------------------------------------------
+BAGIAN 16 — FORMAT OUTPUT, STATUS, KONTROL
+--------------------------------------------------------------------------------
+
+16.1 FORMAT OUTPUT:
+      - Kode file penuh.
+      - Komentar path baris pertama.
+      - Keputusan minor: pilih ter-sederhana + dokumentasikan di
+        komentar.
+
+16.2 BLOK STATUS (tiap akhir fase):
+      ---STATUS START---
+      Fase selesai: [kode]
+      Root cause bug diperbaiki:
+        [Bug-1/Bug-2/Bug-3/Bug-4 — mekanisme + file:baris]
+      File dibuat/diubah: [path]
+      Bukti: [M1..M12 / V1..V12 / benchmark / screenshot]
+      Deviation: [-]
+      Stub/TODO: [-]
+      Regression cepat: [X/Y PASS]
+      Fase berikutnya: [kode]
+      ---STATUS END---
+
+16.3 LAPOR BUG (DARI USER):
+      - Layar.
+      - Repro 1-2-3.
+      - Ekspektasi (kutip bagian spec).
+      - Aktual + logcat.
+      - Fix hanya bug itu + root cause + re-run test.
+
+16.4 DRIFT:
+      "STOP. Pelanggaran [Rn/R-Dn]. Batalkan, kembali ke spec. Ragu?
+       KUTIP dokumen ini."
+
+16.5 RESUME SESI BARU:
+      Kirim dokumen ini + STATUS terakhir
+      + "Lanjut fase [X]. Restate pemahaman, tunggu OK."
+
+--------------------------------------------------------------------------------
+LAMPIRAN A — KONSTANTA
+--------------------------------------------------------------------------------
+
+WARNA:
+  bg          #121212
+  surface     #1C1C1E
+  card        #262626
+  border      #2C2C2E
+  teks        #F5F5F5
+  sekunder    #9CA3AF
+  hijau       #22C55E (primary/income/FAB/tab aktif)
+  oranye      #FB923C (expense)
+  biru        #3B82F6 (transfer)
+  merah       #EF4444
+  kuning      #EAB308
+
+  AMOLED:
+    bg        #000000
+    surface   #0A0A0A
+
+UKURAN:
+  Bottom bar         80 dp
+  FAB                56 dp (seragam, semua layar)
+  Row Detail         72 dp
+  Row Investasi      64 dp
+  Radius             12 / 8 dp
+
+PRESISI:
+  Emas               3 desimal (gram)
+  Crypto             4 desimal (coin)
+  Lot                integer
+  Rupiah             integer
+  Persen             2 desimal
+
+--------------------------------------------------------------------------------
+LAMPIRAN B — PERILAKU BISNIS (R1) — UPDATE v7
+--------------------------------------------------------------------------------
+
+1.  Saldo = opening + income(acc) + transfer(ke acc) - expense(acc)
+    - transfer(dari acc); transfer netral di ringkasan.
+    INVESTASI TIDAK mengurangi saldo akun (R15).
+
+2.  Keypad kiri-ke-kanan tanpa precedence
+    (10.000+5.000x2=30.000); tanpa eval; bagi nol = error;
+    IDR 0 desimal, USD 2.
+    FORMAT ANGKA mengikuti §2.
+
+3.  Budget cycle:
+      today.day >= startDay
+        ? [startDay bulan ini, startDay bulan depan)
+        : [startDay bulan lalu, startDay bulan ini);
+    eksklusif; YearMonth; Des->Jan benar.
+
+4.  Rutinan (dulu Recurring):
+      id "rec-{id}-{dateISO}"; auto-post sekali per proses;
+      while nextDue <= today; monthly clamp anchorDay;
+      TAHUNAN tambah anchorMonth + anchorDay (29 Feb -> 28 Feb).
+      Restart = 0 duplikat.
+
+5.  Goals:
+      current = initial + sum(deposit);
+      estimasi = ceil((target - current) / bulan sisa);
+      telat = "Terlambat X hari".
+
+6.  Habit:
+      log by tx.date; consistency 30 hari;
+      streak berakhir hari ini/kemarin;
+      🌰<20% 🌱<40% 🌿<60% 🪴<80% 🌳>=80%.
+
+7.  Challenge:
+      4 tier (100/120/110/70);
+      tolak 3x lalu wajib;
+      XP 25/50/75/150;
+      random bobot 40/30/20/10;
+      progress live dari transaksi;
+      instant-fail DailyMax/WeeklyMax/Zero/CountMax;
+      instant-complete Accumulate/Save/NoSpend;
+      ReducePercent baseline snapshot 30 hari saat Berani.
+
+8.  ~~Parser chatbot~~ DIHAPUS (R13).
+
+9.  Format IDR "Rp150.000"; CSV ";" + BOM;
+    ANGKA DI UI SELALU BERFORMAT (§2).
+
+10. Semua data persist Room; i18n values-id/en;
+    process death aman.
+
+11. INVESTASI:
+      IDX & AS unit = lot (IDX 1 lot = 100 lembar);
+      ETF = shares;
+      Crypto = coin (4 desimal);
+      Emas = gram (3 desimal);
+      Reksa Dana = Rp (+ persen);
+      Deposito = Rp (+ persen + tenor hari + auto-renew).
+      Semua kalkulasi BigDecimal.
+      Total Kekayaan = saldo akun + nilai investasi net.
+
+--------------------------------------------------------------------------------
+LAMPIRAN C — REGRESI
+--------------------------------------------------------------------------------
+
+(M1-M12 di §1.3 dijalankan TERPISAH dan WAJIB duluan.)
+
+ 1. Fresh install kosong; Load Dummy via tombol (M1, M2).
+ 2. 3 akun (Cash 500rb, BCA 5jt, GoPay 250rb) -> total Rp5.750.000.
+ 3. Keypad "25.000+25.000 =" -> 50.000; "10.000+5.000x2 =" -> 30.000.
+    Kedua input tampil berformat sejak awal.
+ 4. Transfer Bank->Cash 1jt -> dua saldo berubah, total netral.
+ 5. Simpan & Lanjut: kategori/akun/tanggal tetap.
+ 6. Budget 500rb + expense 600rb -> 120% merah + "Melebihi
+    Rp100.000".
+ 7. Goal 5jt/10 bln setor 500rb -> 20% + estimasi benar.
+ 8. Rutinan nextDue kemarin + autoPost -> restart -> 1 tx;
+    restart kedua -> masih 1.
+ 9. ~~Chat~~ DIHAPUS (R13).
+10. Export CSV rapi di Excel Indonesia (BOM + ";").
+11. Ganti bahasa EN -> instan + persist.
+12. Hapus akun ber-transaksi -> warning jumlah benar.
+13. 3 hari berturut transaksi -> streak 🔥3 + stage naik.
+14. Tantangan: tolak 3x -> popup ke-4 wajib;
+    ch-001: 4rb -> 4/30 sisa 26rb + Snackbar;
+    +26rb -> COMPLETED + XP.
+15. DailyMax jajan 5rb dilanggar 7rb -> INSTAN FAILED.
+16. SaveMin: deposit goal 10rb + transfer ke akun isSavings 15rb ->
+    COMPLETED; akun biasa tidak dihitung.
+17. Reset -> kosong; pakai 10 menit; buka lagi -> data user UTUH
+    (M4+M5).
+18. Bottom nav: scroll/filter tab Detail terselamatkan pindah tab.
+19. Chart & Habit versi-nol tampil rapi saat kosong.
+20. INV-1: Tambah Saham IDX: harga 2.000, 5 lot ->
+    tampil "5 lot (500 lembar) = Rp1.000.000". Gain/loss benar.
+21. INV-2: Tambah Crypto 0,0004 BTC @ Rp700.000.000 ->
+    nilai Rp280.000, tanpa error presisi.
+22. INV-3: Tambah Emas 0,001 g @ Rp1.200.000 -> nilai Rp1.200.
+23. INV-4: Deposito Rp10.000.000, 5,50%, 14 hari, auto-renew ->
+    jatuh tempo ter-update 1x otomatis; M12 PASS.
+24. INV-5: Edit aset (salah ketik nama) -> tersimpan benar.
+25. INV-6: Hapus riwayat investasi -> dialog konfirmasi ->
+    row hilang.
+26. INV-7: Chart investasi menampilkan label kategori + persen,
+    bukan hanya warna.
+27. INV-8: Tabel Riwayat: sticky header, body scroll, kolom persis
+    "tanggal | jenis | nama aset | jumlah beli | harga saat beli".
+28. INV-9: FAB "+" di tab Investasi membuka form TAMBAH CATATAN
+    INVESTASI, bukan layar investasi lagi (Bug-3a).
+29. INV-10: FAB tidak menutupi row terakhir; scroll ke bawah ->
+    tombol hapus terlihat (Bug-4).
+30. UI-1: Emoji picker >= 400 emoji; kategori custom dengan emoji
+    tampil di form.
+31. UI-2: Budget alert muncul pada sisa Rp yang dikonfigurasi user.
+32. UI-3: Rutinan tahunan 29 Feb -> otomatis 28 Feb tahun non-kabisat.
+33. UI-4: Format angka otomatis: 100 -> 100, 1.000 -> 1.000, ...,
+    1.000.000 -> 1.000.000.
+34. UI-5: Biometric prompt muncul saat cold start bila diaktifkan.
+35. UI-6: Privacy mode menyembunyikan semua nominal.
+36. UI-7: Achievement "first investasi" unlock setelah INV-1.
+37. 0 error logcat seluruh skenario.
+
+--------------------------------------------------------------------------------
+CATATAN ADAPTASI WEB -> ANDROID (R17)
+--------------------------------------------------------------------------------
+
+Semua permintaan berbasis web di daftar user dipetakan ke padanan
+native:
+
+  IndexedDB / Dexie.js       ->  Room (SQLite)
+  Zustand / Jotai            ->  ViewModel + StateFlow
+  PWA (installable)          ->  APK / AAB installable
+  Service Worker (offline)   ->  WorkManager + Room (source of truth)
+  Code Splitting             ->  R8 + dynamic feature modules
+  Multi-Platform Sync        ->  (tidak ada; STUB, butuh backend)
+  Web Worker                 ->  Dispatchers.Default/IO
+  LocalStorage               ->  DataStore Preferences
+  Session Storage            ->  ViewModel (in-memory, non-persistent)
+
+Fitur yang butuh data live dari internet TIDAK dapat diimplementasikan
+secara jujur tanpa API berbayar:
+  - Harga saham / crypto realtime (butuh API seperti Yahoo Finance,
+    Alpha Vantage, CoinGecko Pro).
+  - Kurs otomatis (butuh API forex).
+  - Dividend auto-fetch (butuh API khusus).
+  - Sync cloud / multi-device (butuh backend).
+  - Two-way calendar sync (butuh akun Google).
+
+Fitur-fitur di atas ditandai STUB/TODO dengan penjelasan API mana
+yang dibutuhkan bila kelak user ingin menambahkannya.
+
+--------------------------------------------------------------------------------
+MULAI DARI FASE H (H1: DIAGNOSIS D0).
+STATUS + BERHENTI tiap fase.
+--------------------------------------------------------------------------------
